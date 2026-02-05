@@ -17,14 +17,13 @@ import (
 )
 
 func main() {
-	// 1) логгер создаём ДО запуска сервера
+	// zap logger: если не поднялся — только тут допустим std log.Fatal
 	logger, err := logging.NewProductionLogger()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// 2) Загружаем конфиги очередей при старте (fail-fast)
 	queuesDir := os.Getenv("QUEUES_CONFIG_DIR")
 	if queuesDir == "" {
 		queuesDir = "./configs"
@@ -32,10 +31,14 @@ func main() {
 
 	cfgs, err := config.LoadQueueConfigs(queuesDir)
 	if err != nil {
-		logger.Fatal("load queue configs", zap.String("dir", queuesDir), zap.Error(err))
+		logger.Fatal("load queue configs",
+			zap.String("dir", queuesDir),
+			zap.Error(err),
+		)
 	}
 
-	qm := queue.NewManager()
+	qm := queue.NewManager(logger)
+
 	for _, qc := range cfgs {
 		sch, err := validate.LoadSchemaFromFile(qc.SchemaFile)
 		if err != nil {
@@ -45,17 +48,23 @@ func main() {
 				zap.Error(err),
 			)
 		}
+
 		if err := qm.AddQueue(qc, sch); err != nil {
-			logger.Fatal("add queue", zap.String("queue", qc.Name), zap.Error(err))
+			logger.Fatal("add queue",
+				zap.String("queue", qc.Name),
+				zap.Error(err),
+			)
 		}
 	}
 
-	logger.Info("queues loaded", zap.Strings("queues", qm.ListNames()))
+	logger.Info("queues loaded",
+		zap.String("queues_dir", queuesDir),
+		zap.Strings("queues", qm.ListNames()),
+	)
 
-	// 3) роуты
+	// routes
 	mux := http.NewServeMux()
 
-	// health
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -65,13 +74,10 @@ func main() {
 		http.Redirect(w, r, "/health", http.StatusPermanentRedirect)
 	})
 
-	// static files at /static/
 	fs := http.FileServer(http.Dir("web/static"))
 	mux.Handle("/static/", http.StripPrefix("/static/", fs))
 
-// остальные маршруты (пока один: POST /{queue}/newmessage)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// главная страница
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
 			http.ServeFile(w, r, "web/static/index.html")
 			return
@@ -93,11 +99,11 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// 4) middleware (RequestID снаружи)
-	handler := httpserver.AccessLog(logger, mux)
+	// middleware: сначала RequestID, потом AccessLog (чтобы лог видел request_id)
+	var handler http.Handler = mux
 	handler = httpserver.RequestID(handler)
+	handler = httpserver.AccessLog(logger, handler)
 
-	// 5) сервер
 	addr := "0.0.0.0:8080"
 	srv := httpserver.New(httpserver.Config{
 		Addr:              addr,
@@ -106,6 +112,8 @@ func main() {
 	})
 
 	logger.Info("starting server", zap.String("addr", addr))
-	log.Println("listening on http://localhost:8080")
-	log.Fatal(srv.ListenAndServe())
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Fatal("server stopped", zap.Error(err))
+	}
 }
