@@ -1,0 +1,4 @@
+name: queue1
+schema_file: queue1.schema.json
+max_size: 100
+workers: 2
