@@ -17,7 +17,6 @@ import (
 )
 
 func main() {
-	// zap logger: если не поднялся — только тут допустим std log.Fatal
 	logger, err := logging.NewProductionLogger()
 	if err != nil {
 		log.Fatal(err)
@@ -38,6 +37,7 @@ func main() {
 	}
 
 	qm := queue.NewManager(logger)
+	defer qm.StopAll()
 
 	for _, qc := range cfgs {
 		sch, err := validate.LoadSchemaFromFile(qc.SchemaFile)
@@ -49,6 +49,10 @@ func main() {
 			)
 		}
 
+		// ВАЖНО: AddQueue теперь сам:
+		// - читает из qc runtime/script/timeout/max_queue и т.д.
+		// - выставляет rt.Command / rt.ScriptPath
+		// - стартует воркеры
 		if err := qm.AddQueue(qc, sch); err != nil {
 			logger.Fatal("add queue",
 				zap.String("queue", qc.Name),
@@ -62,7 +66,6 @@ func main() {
 		zap.Strings("queues", qm.ListNames()),
 	)
 
-	// routes
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +102,6 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// middleware: сначала RequestID, потом AccessLog (чтобы лог видел request_id)
 	var handler http.Handler = mux
 	handler = httpserver.RequestID(handler)
 	handler = httpserver.AccessLog(logger, handler)

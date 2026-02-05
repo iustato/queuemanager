@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -14,8 +15,8 @@ import (
 
 const (
 	headerMsgUUID = "X-Message-UUID"
-	cmdNewMessage  = "newmessage"
-	maxBodyBytes   = 1 << 20 // 1 MiB
+	cmdNewMessage = "newmessage"
+	maxBodyBytes  = 1 << 20 // 1 MiB (глобальный safety-лимит)
 )
 
 func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *http.Request) {
@@ -72,12 +73,31 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		return
 	}
 
-	// 3) read body (with limit)
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	// 3) read body (with per-queue MaxSize + global cap)
+	limit := int64(maxBodyBytes)
+	if rt.Cfg.MaxSize > 0 && int64(rt.Cfg.MaxSize) < limit {
+		limit = int64(rt.Cfg.MaxSize)
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	defer func() { _ = r.Body.Close() }()
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		// MaxBytesReader возвращает специфическую ошибку при превышении лимита
+		if errors.As(err, new(*http.MaxBytesError)) {
+			status := http.StatusRequestEntityTooLarge // 413
+			m.log.Warn("queue_new_message_rejected",
+				append(baseFields(status),
+					zap.String("reason", "payload_too_large"),
+					zap.Int64("limit_bytes", limit),
+					zap.Int("max_size", rt.Cfg.MaxSize),
+				)...,
+			)
+			http.Error(w, "payload too large", status)
+			return
+		}
+
 		status := http.StatusBadRequest
 		m.log.Warn("queue_new_message_rejected",
 			append(baseFields(status),
@@ -89,6 +109,9 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		return
 	}
 
+	// поле для логов: сколько реально байт пришло
+	payloadBytes := len(body)
+
 	// 4) parse json
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -96,6 +119,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		m.log.Warn("queue_new_message_rejected",
 			append(baseFields(status),
 				zap.String("reason", "invalid_json"),
+				zap.Int("payload_bytes", payloadBytes),
 				zap.Error(err),
 			)...,
 		)
@@ -109,6 +133,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		m.log.Warn("queue_new_message_rejected",
 			append(baseFields(status),
 				zap.String("reason", "schema_validation_failed"),
+				zap.Int("payload_bytes", payloadBytes),
 				zap.Error(err),
 			)...,
 		)
@@ -116,11 +141,47 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		return
 	}
 
-	// 6) enqueue (пока заглушка) -> успех
+	// 6) enqueue -> реальная постановка в очередь
+	// 6) enqueue -> реальная постановка в очередь (CGI контекст внутри Job)
+	job := Job{
+		Queue:       queueName,
+		MsgID:       msgID,
+		Body:        body,
+		EnqueuedAt:  time.Now(),
+		Attempt:     1,
+		Method:      r.Method,
+		QueryString: r.URL.RawQuery,
+		ContentType: r.Header.Get("Content-Type"),
+		RemoteAddr:  r.RemoteAddr,
+	}
+
+	if err := rt.Enqueue(job); err != nil {
+		status := http.StatusTooManyRequests
+		reason := "enqueue_failed"
+
+		// если вдруг очередь исчезла между Get и Enqueue
+		// (можешь не делать, но оставим совместимость)
+		if errors.Is(err, ErrUnknownQueue) {
+			status = http.StatusNotFound
+			reason = "unknown_queue"
+		}
+
+		m.log.Warn("queue_new_message_rejected",
+			append(baseFields(status),
+				zap.String("reason", reason),
+				zap.Error(err),
+				zap.Int("payload_bytes", payloadBytes),
+			)...,
+		)
+
+		http.Error(w, err.Error(), status)
+		return
+	}
+
 	status := http.StatusAccepted
 	m.log.Info("queue_new_message_accepted",
 		append(baseFields(status),
-			zap.Int("payload_bytes", len(body)),
+			zap.Int("payload_bytes", payloadBytes),
 		)...,
 	)
 

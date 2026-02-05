@@ -17,9 +17,9 @@ type CompiledSchema struct {
 
 // LoadSchemaFromFile загружает и компилирует JSON Schema из файла.
 //
-//  - чтение файла
-//  - парсинг JSON Schema
-//  - компиляция (проверка ссылок, draft и т.д.)
+//   - чтение файла
+//   - парсинг JSON Schema
+//   - компиляция (проверка ссылок, draft и т.д.)
 //
 // Если здесь ошибка — сервис НЕ должен стартовать.
 func LoadSchemaFromFile(path string) (*CompiledSchema, error) {
@@ -39,7 +39,7 @@ func LoadSchemaFromFile(path string) (*CompiledSchema, error) {
 	compiler.Draft = jsonschema.Draft2020
 
 	// jsonschema.Compiler работает с ресурсами по URL
-	
+
 	schemaURL := "file://" + filepath.ToSlash(absPath)
 
 	if err := compiler.AddResource(schemaURL, strings.NewReader(string(data))); err != nil {

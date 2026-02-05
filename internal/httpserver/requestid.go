@@ -1,17 +1,18 @@
 package httpserver
 
 import (
-    "context"
-    "crypto/rand"
-    "encoding/hex"
-    "net/http"
-    "strconv"
-    "strings"
-    "time"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
 type ctxKey struct{}
-var requestIDKey = ctxKey{}//пустая структура для хранения
+
+var requestIDKey = ctxKey{} //пустая структура для хранения
 
 func GetRequestID(ctx context.Context) string {
 	v, _ := ctx.Value(requestIDKey).(string)

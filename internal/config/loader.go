@@ -15,15 +15,19 @@ import (
 //   - читаем ВСЕ *.yaml / *.yml файлы
 //   - каждая конфигурация должна быть валидна
 //   - при любой ошибке сервис не стартует (fail-fast)
-//
 func LoadQueueConfigs(dir string) ([]QueueConfig, error) {
-	// Читаем содержимое директории один раз при старте сервиса
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("abs config dir: %w", err)
+	}
+	dir = absDir
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read config dir: %w", err)
 	}
 
-	var result []QueueConfig//возвращаем срез всех валидных конфигов
+	var result []QueueConfig //возвращаем срез всех валидных конфигов
 
 	// seen используется для защиты от двух файлов,
 	seen := make(map[string]struct{})
@@ -48,7 +52,7 @@ func LoadQueueConfigs(dir string) ([]QueueConfig, error) {
 			return nil, err
 		}
 
-		// 3. Валидируем сам YAML-конфиг 
+		// 3. Валидируем сам YAML-конфиг
 		if err := validateConfig(cfg); err != nil {
 			return nil, err
 		}
@@ -106,6 +110,10 @@ func normalizeConfig(cfg *QueueConfig, fileName, baseDir string) error {
 	// чтобы сервис можно было запускать из любого cwd.
 	if !filepath.IsAbs(cfg.SchemaFile) {
 		cfg.SchemaFile = filepath.Join(baseDir, cfg.SchemaFile)
+	}
+
+	if !filepath.IsAbs(cfg.Script) {
+		cfg.Script = filepath.Join(baseDir, cfg.Script)
 	}
 
 	return nil

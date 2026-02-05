@@ -2,3 +2,9 @@ name: queue1
 schema_file: queue1.schema.json
 max_size: 100
 workers: 2
+
+runtime: php-cgi
+script: scripts/queue1.php
+
+timeout_sec: 10
+max_queue: 100

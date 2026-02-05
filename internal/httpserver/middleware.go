@@ -41,8 +41,13 @@ func AccessLog(log *zap.Logger, next http.Handler) http.Handler {
 			remote = host
 		}
 
+		rid := sw.Header().Get("X-Request-Id")
+		if rid == "" {
+			rid = GetRequestID(r.Context())
+		}
+
 		log.Info("http_request",
-			zap.String("request_id", GetRequestID(r.Context())),
+			zap.String("request_id", rid),
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
 			zap.Int("status", sw.status),
