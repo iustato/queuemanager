@@ -1,10 +1,19 @@
 name: queue1
+
+# схема валидации body (можно оставить как есть)
 schema_file: queue1.schema.json
+
+# логический максимум сообщений (не критично для теста)
 max_size: 100
-workers: 2
+
+# сколько job'ов выполняются параллельно
+workers: 3
 
 runtime: php-cgi
 script: scripts/queue1.php
 
-timeout_sec: 10
-max_queue: 100
+# timeout больше sleep'а в PHP
+timeout_sec: 30
+
+# буфер очереди (должен быть > workers)
+max_queue: 10

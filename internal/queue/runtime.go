@@ -32,6 +32,7 @@ type Job struct {
 	QueryString string
 	ContentType string
 	RemoteAddr  string
+	IdempotencyKey string
 }
 
 type Result struct {
@@ -68,43 +69,53 @@ func (ExecRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 	cmd.Stdin = bytes.NewReader(job.Body)
 
 	// CGI mode for php-cgi
-	if rt.Command[0] == "php-cgi" {
-		if strings.TrimSpace(rt.ScriptPath) == "" {
-			return Result{
-				Queue:      job.Queue,
-				MsgID:      job.MsgID,
-				ExitCode:   1,
-				Err:        fmt.Errorf("no script configured for queue %q", rt.Cfg.Name),
-				DurationMs: time.Since(start).Milliseconds(),
-			}
-		}
+	// CGI mode for php-cgi
+if rt.Command[0] == "php-cgi" {
+    if strings.TrimSpace(rt.ScriptPath) == "" {
+        return Result{
+            Queue:      job.Queue,
+            MsgID:      job.MsgID,
+            ExitCode:   1,
+            Err:        fmt.Errorf("no script configured for queue %q", rt.Cfg.Name),
+            DurationMs: time.Since(start).Milliseconds(),
+        }
+    }
 
-		method := job.Method
-		if strings.TrimSpace(method) == "" {
-			method = "POST"
-		}
+    method := job.Method
+    if strings.TrimSpace(method) == "" {
+        method = "POST"
+    }
 
-		ct := job.ContentType
-		if strings.TrimSpace(ct) == "" {
-			ct = "application/json"
-		}
+    ct := job.ContentType
+    if strings.TrimSpace(ct) == "" {
+        ct = "application/json"
+    }
 
-		remote := stripPort(job.RemoteAddr)
+    remote := stripPort(job.RemoteAddr)
 
-		env := append(os.Environ(),
-			"GATEWAY_INTERFACE=CGI/1.1",
-			"SERVER_PROTOCOL=HTTP/1.1",
-			"REQUEST_METHOD="+method,
-			"SCRIPT_FILENAME="+rt.ScriptPath,
-			"SCRIPT_NAME="+filepath.Base(rt.ScriptPath),
-			"QUERY_STRING="+job.QueryString,
-			"CONTENT_TYPE="+ct,
-			"CONTENT_LENGTH="+strconv.Itoa(len(job.Body)),
-			"REMOTE_ADDR="+remote,
-			"REDIRECT_STATUS=200",
-		)
-		cmd.Env = env
-	}
+    env := append(os.Environ(),
+        "GATEWAY_INTERFACE=CGI/1.1",
+        "SERVER_PROTOCOL=HTTP/1.1",
+        "REQUEST_METHOD="+method,
+        "SCRIPT_FILENAME="+rt.ScriptPath,
+        "SCRIPT_NAME="+filepath.Base(rt.ScriptPath),
+        "QUERY_STRING="+job.QueryString,
+        "CONTENT_TYPE="+ct,
+        "CONTENT_LENGTH="+strconv.Itoa(len(job.Body)),
+        "REMOTE_ADDR="+remote,
+        "REDIRECT_STATUS=200",
+        "MSG_ID="+job.MsgID,
+        "QUEUE="+job.Queue,
+        "ATTEMPT="+strconv.Itoa(job.Attempt),
+    )
+
+    if k := strings.TrimSpace(job.IdempotencyKey); k != "" {
+        env = append(env, "HTTP_IDEMPOTENCY_KEY="+k)
+    }
+
+    cmd.Env = env
+}
+
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
