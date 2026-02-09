@@ -10,7 +10,7 @@ max_size: 100
 workers: 3
 
 runtime: php-cgi
-script: scripts/queue1.php
+script: scripts/job.php
 
 # timeout больше sleep'а в PHP
 timeout_sec: 30

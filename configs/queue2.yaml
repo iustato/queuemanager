@@ -1,0 +1,15 @@
+name: queue2
+
+schema_file: queue1.schema.json
+
+max_size: 100
+workers: 3
+
+runtime: php-fpm
+script: scripts/job.php
+
+fpm_network: unix
+fpm_address: /run/php/php8.3-fpm.sock
+
+timeout_sec: 30
+max_queue: 10

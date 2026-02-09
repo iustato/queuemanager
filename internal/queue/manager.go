@@ -128,9 +128,6 @@ func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.Compiled
 		return err
 	}
 
-	// если раньше была команда — можно сохранить
-	// (опционально) если нужно — перенеси old.Command сюда
-
 	m.queues[cfg.Name] = rt
 
 	m.log.Info("queue_replaced",

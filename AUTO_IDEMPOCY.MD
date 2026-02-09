@@ -1,0 +1,1 @@
+ALLOW_AUTO_IDEMPOTENCY=true go run ./cmd/server

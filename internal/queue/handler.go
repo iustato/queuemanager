@@ -1,113 +1,145 @@
 package queue
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"strconv"
+	"os"
 	"strings"
 	"time"
 
 	"go-web-server/internal/httpserver"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 const (
 	headerIdempotencyKey = "Idempotency-Key"
 	cmdNewMessage        = "newmessage"
-	maxBodyBytes         = 1 << 20 // 1 MiB (глобальный safety-лимит)
+	maxBodyBytes         = 1 << 20 // 1 MiB
 )
 
-func newMessageID() string {
-	// временно: UUIDv4-подобный безопасный рандом (32 hex chars)
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		// fallback на время (хуже, но не падаем)
-		return strconv.FormatInt(time.Now().UnixNano(), 16)
+func newUUIDv7String() (string, error) {
+	u, err := uuid.NewV7()
+	if err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return u.String(), nil
 }
 
 func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	requestID := httpserver.GetRequestID(r.Context())
 
-	// 1) queue exists?
-	rt, ok := m.Get(queueName)
-	if !ok {
-		status := http.StatusNotFound
-		m.log.Warn("queue_new_message_rejected",
-			zap.String("request_id", requestID),
-			zap.String("queue", queueName),
-			zap.String("cmd", cmdNewMessage),
-			zap.String("reason", "unknown_queue"),
-			zap.Int("status", status),
-			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
-		)
-		http.Error(w, "unknown queue", status)
-		return
-	}
-
-	// 2) idempotency key (optional/required — у тебя сейчас required)
-	idemKey := strings.TrimSpace(r.Header.Get(headerIdempotencyKey))
-	if idemKey == "" {
-		status := http.StatusBadRequest
-		m.log.Warn("queue_new_message_rejected",
-			zap.String("request_id", requestID),
-			zap.String("queue", queueName),
-			zap.String("cmd", cmdNewMessage),
-			zap.String("reason", "missing_idempotency_key"),
-			zap.Int("status", status),
-			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
-		)
-		http.Error(w, "missing Idempotency-Key header", status)
-		return
-	}
-	if !looksLikeUUID(idemKey) {
-		status := http.StatusBadRequest
-		m.log.Warn("queue_new_message_rejected",
-			zap.String("request_id", requestID),
-			zap.String("queue", queueName),
-			zap.String("cmd", cmdNewMessage),
-			zap.String("reason", "invalid_idempotency_key_format"),
-			zap.String("idempotency_key", idemKey),
-			zap.Int("status", status),
-			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
-		)
-		http.Error(w, "invalid Idempotency-Key format", status)
-		return
-	}
-
-	// 3) generate msg id (всегда серверный)
-	msgID := newMessageID()
-	if msgID == "" {
-		m.log.Error("msg_id_generation_failed",
-			zap.String("request_id", requestID),
-			zap.String("queue", queueName),
-			zap.String("cmd", cmdNewMessage),
-		)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// helper: единые поля в каждом логе (теперь msgID уже готов)
-	baseFields := func(status int) []zap.Field {
+	baseRequestFields := func(status int) []zap.Field {
 		return []zap.Field{
 			zap.String("request_id", requestID),
 			zap.String("queue", queueName),
 			zap.String("cmd", cmdNewMessage),
-			zap.String("msg_id", msgID),
-			zap.String("idempotency_key", idemKey),
 			zap.Int("status", status),
 			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
 		}
 	}
 
-	// 4) read body (with per-queue MaxSize + global cap)
+	// 1) queue exists?
+	rt, ok := m.Get(queueName)
+	if !ok {
+		status := http.StatusNotFound
+		m.log.Warn("queue_new_message_rejected",
+			append(baseRequestFields(status),
+				zap.String("reason", "unknown_queue"),
+			)...,
+		)
+		http.Error(w, "unknown queue", status)
+		return
+	}
+
+	// 2) idempotency key
+	idemKey := strings.TrimSpace(r.Header.Get(headerIdempotencyKey))
+	generatedIdem := false
+
+	if idemKey == "" {
+		if os.Getenv("ALLOW_AUTO_IDEMPOTENCY") == "true" {
+			gen, err := newUUIDv7String()
+			if err != nil {
+				status := http.StatusInternalServerError
+				m.log.Error("idempotency_generation_failed",
+					append(baseRequestFields(status),
+						zap.Error(err),
+					)...,
+				)
+				http.Error(w, "internal error", status)
+				return
+			}
+			idemKey = gen
+			generatedIdem = true
+			w.Header().Set(headerIdempotencyKey, idemKey)
+		} else {
+			status := http.StatusBadRequest
+			m.log.Warn("queue_new_message_rejected",
+				append(baseRequestFields(status),
+					zap.String("reason", "missing_idempotency_key"),
+				)...,
+			)
+			http.Error(w, "missing Idempotency-Key header", status)
+			return
+		}
+	}
+
+	parsed, err := uuid.Parse(idemKey)
+	if err != nil {
+		status := http.StatusBadRequest
+		m.log.Warn("queue_new_message_rejected",
+			append(baseRequestFields(status),
+				zap.String("reason", "invalid_idempotency_key_format"),
+				zap.String("idempotency_key", idemKey),
+				zap.Bool("idempotency_generated", generatedIdem),
+				zap.Error(err),
+			)...,
+		)
+		http.Error(w, "invalid Idempotency-Key format", status)
+		return
+	}
+
+	if parsed.Version() != uuid.Version(7) {
+		status := http.StatusBadRequest
+		m.log.Warn("queue_new_message_rejected",
+			append(baseRequestFields(status),
+				zap.String("reason", "idempotency_key_not_uuid7"),
+				zap.String("idempotency_key", idemKey),
+				zap.Bool("idempotency_generated", generatedIdem),
+				zap.Int("uuid_version", int(parsed.Version())),
+			)...,
+		)
+		http.Error(w, "Idempotency-Key must be UUIDv7", status)
+		return
+	}
+
+	// 3) generate msg id (server-side)
+	msgID, err := newUUIDv7String()
+	if err != nil {
+		status := http.StatusInternalServerError
+		m.log.Error("msg_id_generation_failed",
+			append(baseRequestFields(status),
+				zap.Error(err),
+			)...,
+		)
+		http.Error(w, "internal error", status)
+		return
+	}
+
+	baseJobFields := func(status int) []zap.Field {
+		return append(
+			baseRequestFields(status),
+			zap.String("msg_id", msgID),
+			zap.String("idempotency_key", idemKey),
+			zap.Bool("idempotency_generated", generatedIdem),
+		)
+	}
+
+	// 4) read body (per-queue MaxSize + global cap)
 	limit := int64(maxBodyBytes)
 	if rt.Cfg.MaxSize > 0 && int64(rt.Cfg.MaxSize) < limit {
 		limit = int64(rt.Cfg.MaxSize)
@@ -119,9 +151,9 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if errors.As(err, new(*http.MaxBytesError)) {
-			status := http.StatusRequestEntityTooLarge // 413
+			status := http.StatusRequestEntityTooLarge
 			m.log.Warn("queue_new_message_rejected",
-				append(baseFields(status),
+				append(baseJobFields(status),
 					zap.String("reason", "payload_too_large"),
 					zap.Int64("limit_bytes", limit),
 					zap.Int("max_size", rt.Cfg.MaxSize),
@@ -133,7 +165,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 
 		status := http.StatusBadRequest
 		m.log.Warn("queue_new_message_rejected",
-			append(baseFields(status),
+			append(baseJobFields(status),
 				zap.String("reason", "read_body_failed"),
 				zap.Error(err),
 			)...,
@@ -149,7 +181,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 	if err := json.Unmarshal(body, &payload); err != nil {
 		status := http.StatusBadRequest
 		m.log.Warn("queue_new_message_rejected",
-			append(baseFields(status),
+			append(baseJobFields(status),
 				zap.String("reason", "invalid_json"),
 				zap.Int("payload_bytes", payloadBytes),
 				zap.Error(err),
@@ -163,7 +195,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 	if err := rt.Schema.ValidateJSON(payload); err != nil {
 		status := http.StatusUnprocessableEntity
 		m.log.Warn("queue_new_message_rejected",
-			append(baseFields(status),
+			append(baseJobFields(status),
 				zap.String("reason", "schema_validation_failed"),
 				zap.Int("payload_bytes", payloadBytes),
 				zap.Error(err),
@@ -196,7 +228,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		}
 
 		m.log.Warn("queue_new_message_rejected",
-			append(baseFields(status),
+			append(baseJobFields(status),
 				zap.String("reason", reason),
 				zap.Error(err),
 				zap.Int("payload_bytes", payloadBytes),
@@ -209,33 +241,11 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 
 	status := http.StatusAccepted
 	m.log.Info("queue_new_message_accepted",
-		append(baseFields(status),
+		append(baseJobFields(status),
 			zap.Int("payload_bytes", payloadBytes),
 		)...,
 	)
 
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte("accepted"))
-}
-
-func looksLikeUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for _, i := range []int{8, 13, 18, 23} {
-		if s[i] != '-' {
-			return false
-		}
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] == '-' {
-			continue
-		}
-		c := s[i]
-		isHex := ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
-		if !isHex {
-			return false
-		}
-	}
-	return true
 }
