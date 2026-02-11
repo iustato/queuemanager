@@ -18,6 +18,7 @@ import (
 
 	"go-web-server/internal/config"
 	"go-web-server/internal/validate"
+	"go-web-server/internal/storage"
 
 	"go.uber.org/zap"
 )
@@ -567,6 +568,7 @@ type Runtime struct {
 
 	FPMNetwork string // "unix" | "tcp"
 	FPMAddress string // "/run/php/php8.3-fpm.sock" | "127.0.0.1:9000"
+	Store *storage.Store
 
 	st *runtimeState
 }

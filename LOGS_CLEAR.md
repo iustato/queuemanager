@@ -1,0 +1,2 @@
+rm -f configs/scripts/logs/queue2/* 
+rm -f configs/scripts/logs/queue1/* 

@@ -1,38 +1,33 @@
 package config
 
-// QueueConfig описывает конфигурацию ОДНОЙ очереди
 type QueueConfig struct {
-	// Name — логическое имя очереди.
-	// Если не задано явно в YAML — будет выведено из имени файла.
-	Name string `yaml:"name"`
-
-	// SchemaFile — путь к JSON Schema файла (loader приводит к абсолютному виду).
+	Name       string `yaml:"name"`
 	SchemaFile string `yaml:"schema_file"`
 
-	// MaxSize — максимальный размер входного тела запроса (bytes).
-	MaxSize int `yaml:"max_size"`
+	MaxSize  int    `yaml:"max_size"`
+	Workers  int    `yaml:"workers"`
+	Runtime  string `yaml:"runtime"`
+	Script   string `yaml:"script"`
+	TimeoutSec int  `yaml:"timeout_sec"`
+	MaxQueue int    `yaml:"max_queue"`
 
-	// Workers — количество воркеров (goroutines) для очереди.
-	Workers int `yaml:"workers"`
-
-	// Runtime — чем запускать обработчик:
-	// примеры: "php-cgi", "python3"
-	Runtime string `yaml:"runtime"`
-
-	// Script — путь к скрипту обработчика (php/python).
-	// Лучше относительный от корня проекта или абсолютный (loader может привести к abs).
-	Script string `yaml:"script"`
-
-	// TimeoutSec — таймаут выполнения одного job (сек).
-	// 0 => дефолт (например 10s).
-	TimeoutSec int `yaml:"timeout_sec"`
-
-	// MaxQueue — размер буфера очереди (сколько job может ждать).
-	// 0 => дефолт (например 100).
-	MaxQueue int `yaml:"max_queue"`
+	// --- new ---
+	Idempotency IdempotencyConfig `yaml:"idempotency"`
+	Storage     StorageConfig     `yaml:"storage"`
 }
 
-// AppConfig (опционально) — конфигурация всего приложения.
-type AppConfig struct {
-	QueuesDir string
+type IdempotencyConfig struct {
+	// UUIDv7 старше этого возраста — отклоняем (400)
+	AcceptMaxAge string `yaml:"accept_max_age"` // пример: "30d" или "720h"
+	// минимум хранения для дедупа; если пусто => = AcceptMaxAge
+	RetentionMin string `yaml:"retention_min"` // пример: "30d"
+}
+
+type StorageConfig struct {
+	// default retention, если Forever=false
+	Retention string `yaml:"retention"` // пример: "90d"
+	Forever   bool   `yaml:"forever"`
+
+	GCIntervalSec int `yaml:"gc_interval_sec"` // пример: 60
+	GCMaxDeletes  int `yaml:"gc_max_deletes"`  // пример: 500
 }

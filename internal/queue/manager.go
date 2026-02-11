@@ -8,6 +8,7 @@ import (
 
 	"go-web-server/internal/config"
 	"go-web-server/internal/validate"
+	"go-web-server/internal/storage"
 
 	"go.uber.org/zap"
 )
@@ -16,17 +17,25 @@ type Manager struct {
 	mu     sync.RWMutex
 	queues map[string]*Runtime
 	log    *zap.Logger
+	store *storage.Store
 }
 
 func NewManager(logger *zap.Logger) *Manager {
+	return NewManagerWithStore(logger, nil)
+}
+
+
+func NewManagerWithStore(logger *zap.Logger, st *storage.Store) *Manager {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &Manager{
 		queues: make(map[string]*Runtime),
 		log:    logger.Named("queue"),
+		store:  st,
 	}
 }
+
 
 func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
 	if cfg.Name == "" {
@@ -45,6 +54,7 @@ func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSche
 	rt := &Runtime{
 		Cfg:    cfg,
 		Schema: schema,
+		Store:  m.store,
 	}
 
 	// Значения из конфигурации YAML
@@ -123,7 +133,12 @@ func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.Compiled
 		old.Stop()
 	}
 
-	rt := &Runtime{Cfg: cfg, Schema: schema}
+	rt := &Runtime{
+		Cfg:    cfg,
+		Schema: schema,
+		Store:  m.store, 
+	}
+
 	if err := rt.initIfNeeded(m.log); err != nil {
 		return err
 	}

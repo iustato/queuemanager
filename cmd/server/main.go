@@ -6,12 +6,15 @@ import (
 	"os"
 	"strings"
 	"time"
+	"path/filepath"
 
 	"go-web-server/internal/config"
 	"go-web-server/internal/httpserver"
 	"go-web-server/internal/logging"
 	"go-web-server/internal/queue"
 	"go-web-server/internal/validate"
+	"go-web-server/internal/storage"
+
 
 	"go.uber.org/zap"
 )
@@ -36,7 +39,27 @@ func main() {
 		)
 	}
 
-	qm := queue.NewManager(logger)
+		// --- storage (bbolt) ---
+	stPath := os.Getenv("QUEUE_STORAGE_PATH")
+	if stPath == "" {
+		stPath = "./data/queue.db"
+	}
+	// создадим директорию, если её нет
+	if err := os.MkdirAll(filepath.Dir(stPath), 0o755); err != nil {
+		logger.Fatal("mkdir storage dir", zap.String("path", stPath), zap.Error(err))
+	}
+
+	st, err := storage.Open(storage.OpenOptions{
+		FilePath:    stPath,
+		Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		logger.Fatal("open storage", zap.String("path", stPath), zap.Error(err))
+	}
+	defer func() { _ = st.Close() }()
+
+
+	qm := queue.NewManagerWithStore(logger, st)
 	defer qm.StopAll()
 
 	for _, qc := range cfgs {

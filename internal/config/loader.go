@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -116,6 +117,27 @@ func normalizeConfig(cfg *QueueConfig, fileName, baseDir string) error {
 		cfg.Script = filepath.Join(baseDir, cfg.Script)
 	}
 
+		// ---- defaults for idempotency/storage ----
+	if strings.TrimSpace(cfg.Idempotency.AcceptMaxAge) == "" {
+		cfg.Idempotency.AcceptMaxAge = "30d"
+	}
+	if strings.TrimSpace(cfg.Idempotency.RetentionMin) == "" {
+		cfg.Idempotency.RetentionMin = cfg.Idempotency.AcceptMaxAge
+	}
+
+	// если не forever и retention не задан — храним минимум окно дедупа
+	if !cfg.Storage.Forever && strings.TrimSpace(cfg.Storage.Retention) == "" {
+		cfg.Storage.Retention = cfg.Idempotency.RetentionMin
+	}
+
+	// дефолты GC (можно считать 0 => дефолт)
+	if cfg.Storage.GCIntervalSec == 0 {
+		cfg.Storage.GCIntervalSec = 60
+	}
+	if cfg.Storage.GCMaxDeletes == 0 {
+		cfg.Storage.GCMaxDeletes = 1000
+	}
+
 	return nil
 }
 
@@ -133,5 +155,41 @@ func validateConfig(cfg QueueConfig) error {
 	if cfg.Workers <= 0 {
 		return fmt.Errorf("workers must be > 0")
 	}
+
+	// durations (после normalizeConfig они уже не пустые)
+	accept, err := ParseDurationExt(cfg.Idempotency.AcceptMaxAge)
+	if err != nil {
+		return fmt.Errorf("idempotency.accept_max_age: %w", err)
+	}
+
+	retMin, err := ParseDurationExt(cfg.Idempotency.RetentionMin)
+	if err != nil {
+		return fmt.Errorf("idempotency.retention_min: %w", err)
+	}
+
+	var ret time.Duration
+	if !cfg.Storage.Forever {
+		ret, err = ParseDurationExt(cfg.Storage.Retention)
+		if err != nil {
+			return fmt.Errorf("storage.retention: %w", err)
+		}
+	}
+
+	// sanity-checks
+	if cfg.Storage.GCIntervalSec < 0 || cfg.Storage.GCMaxDeletes < 0 {
+		return fmt.Errorf("storage gc settings must be >= 0")
+	}
+
+	// если не forever — retention должен быть >= max(retMin, accept)
+	if !cfg.Storage.Forever {
+		minNeed := retMin
+		if accept > minNeed {
+			minNeed = accept
+		}
+		if ret != 0 && ret < minNeed {
+			return fmt.Errorf("storage.retention must be >= idempotency window (need at least %s)", minNeed)
+		}
+	}
+
 	return nil
 }

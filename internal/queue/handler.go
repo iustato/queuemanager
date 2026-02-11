@@ -66,9 +66,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 			if err != nil {
 				status := http.StatusInternalServerError
 				m.log.Error("idempotency_generation_failed",
-					append(baseRequestFields(status),
-						zap.Error(err),
-					)...,
+					append(baseRequestFields(status), zap.Error(err))...,
 				)
 				http.Error(w, "internal error", status)
 				return
@@ -117,29 +115,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		return
 	}
 
-	// 3) generate msg id (server-side)
-	msgID, err := newUUIDv7String()
-	if err != nil {
-		status := http.StatusInternalServerError
-		m.log.Error("msg_id_generation_failed",
-			append(baseRequestFields(status),
-				zap.Error(err),
-			)...,
-		)
-		http.Error(w, "internal error", status)
-		return
-	}
-
-	baseJobFields := func(status int) []zap.Field {
-		return append(
-			baseRequestFields(status),
-			zap.String("msg_id", msgID),
-			zap.String("idempotency_key", idemKey),
-			zap.Bool("idempotency_generated", generatedIdem),
-		)
-	}
-
-	// 4) read body (per-queue MaxSize + global cap)
+	// 3) read body (per-queue MaxSize + global cap)
 	limit := int64(maxBodyBytes)
 	if rt.Cfg.MaxSize > 0 && int64(rt.Cfg.MaxSize) < limit {
 		limit = int64(rt.Cfg.MaxSize)
@@ -153,7 +129,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		if errors.As(err, new(*http.MaxBytesError)) {
 			status := http.StatusRequestEntityTooLarge
 			m.log.Warn("queue_new_message_rejected",
-				append(baseJobFields(status),
+				append(baseRequestFields(status),
 					zap.String("reason", "payload_too_large"),
 					zap.Int64("limit_bytes", limit),
 					zap.Int("max_size", rt.Cfg.MaxSize),
@@ -165,7 +141,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 
 		status := http.StatusBadRequest
 		m.log.Warn("queue_new_message_rejected",
-			append(baseJobFields(status),
+			append(baseRequestFields(status),
 				zap.String("reason", "read_body_failed"),
 				zap.Error(err),
 			)...,
@@ -176,12 +152,12 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 
 	payloadBytes := len(body)
 
-	// 5) parse json
+	// 4) parse json
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		status := http.StatusBadRequest
 		m.log.Warn("queue_new_message_rejected",
-			append(baseJobFields(status),
+			append(baseRequestFields(status),
 				zap.String("reason", "invalid_json"),
 				zap.Int("payload_bytes", payloadBytes),
 				zap.Error(err),
@@ -191,11 +167,11 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		return
 	}
 
-	// 6) schema validate
+	// 5) schema validate
 	if err := rt.Schema.ValidateJSON(payload); err != nil {
 		status := http.StatusUnprocessableEntity
 		m.log.Warn("queue_new_message_rejected",
-			append(baseJobFields(status),
+			append(baseRequestFields(status),
 				zap.String("reason", "schema_validation_failed"),
 				zap.Int("payload_bytes", payloadBytes),
 				zap.Error(err),
@@ -204,11 +180,73 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		http.Error(w, "schema validation failed: "+err.Error(), status)
 		return
 	}
+	// 6) generate msg id (candidate)
+	msgID, err := newUUIDv7String()
+	if err != nil {
+		status := http.StatusInternalServerError
+		m.log.Error("msg_id_generation_failed",
+			append(baseRequestFields(status), zap.Error(err))...,
+		)
+		http.Error(w, "internal error", status)
+		return
+	}
 
-	// 7) enqueue
+	expiresAtMs := time.Now().Add(30 * 24 * time.Hour).UnixMilli() // временно
+
+	baseJobFields := func(status int, effectiveMsgID string) []zap.Field {
+		return append(
+			baseRequestFields(status),
+			zap.String("msg_id", effectiveMsgID),
+			zap.String("idempotency_key", idemKey),
+			zap.Bool("idempotency_generated", generatedIdem),
+		)
+	}
+
+	// 7) store (dedup barrier)
+	effectiveMsgID := msgID
+	created := true
+	if rt.Store != nil {
+		storedMsgID, wasCreated, err := rt.Store.PutNewMessage(
+			queueName,
+			msgID,
+			body, // raw payload bytes
+			idemKey,
+			time.Now().UnixMilli(),
+			expiresAtMs,
+		)
+		if err != nil {
+			status := http.StatusInternalServerError
+			m.log.Error("storage_put_failed",
+				append(baseJobFields(status, msgID), zap.Error(err))...,
+			)
+			http.Error(w, "internal error", status)
+			return
+		}
+
+		effectiveMsgID = storedMsgID
+		created = wasCreated
+
+		if !created {
+			// дубль: не enqueue, просто отдаем существующий msg_id
+			status := http.StatusAccepted
+			m.log.Info("queue_new_message_dedup",
+				append(baseJobFields(status, effectiveMsgID),
+					zap.Int("payload_bytes", payloadBytes),
+				)...,
+			)
+
+			w.Header().Set("X-Message-Id", effectiveMsgID)
+			w.Header().Set(headerIdempotencyKey, idemKey)
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte("accepted"))
+			return
+		}
+	}
+
+	// 8) enqueue ONLY for created=true
 	job := Job{
 		Queue:          queueName,
-		MsgID:          msgID,
+		MsgID:          effectiveMsgID,
 		Body:           body,
 		EnqueuedAt:     time.Now(),
 		Attempt:        1,
@@ -220,32 +258,47 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 	}
 
 	if err := rt.Enqueue(job); err != nil {
-		status := http.StatusTooManyRequests
+		st := http.StatusTooManyRequests
 		reason := "enqueue_failed"
 		if errors.Is(err, ErrUnknownQueue) {
-			status = http.StatusNotFound
+			st = http.StatusNotFound
 			reason = "unknown_queue"
 		}
 
 		m.log.Warn("queue_new_message_rejected",
-			append(baseJobFields(status),
+			append(baseJobFields(st, effectiveMsgID),
 				zap.String("reason", reason),
 				zap.Error(err),
 				zap.Int("payload_bytes", payloadBytes),
 			)...,
 		)
-
-		http.Error(w, err.Error(), status)
+		http.Error(w, err.Error(), st)
 		return
 	}
 
 	status := http.StatusAccepted
 	m.log.Info("queue_new_message_accepted",
-		append(baseJobFields(status),
+		append(baseJobFields(status, effectiveMsgID),
 			zap.Int("payload_bytes", payloadBytes),
 		)...,
 	)
 
+	w.Header().Set("X-Message-Id", effectiveMsgID)
+	w.Header().Set(headerIdempotencyKey, idemKey)
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte("accepted"))
+	return
+
+status = http.StatusAccepted
+m.log.Info("queue_new_message_accepted",
+	append(baseJobFields(status, effectiveMsgID),
+		zap.Int("payload_bytes", payloadBytes),
+		// (опционально) zap.Bool("idempotency_generated", idemGenerated),
+	)...,
+)
+
+w.Header().Set("X-Message-Id", msgID)
+w.Header().Set("Idempotency-Key", idemKey)
+w.WriteHeader(status)
+_, _ = w.Write([]byte("accepted"))
 }
