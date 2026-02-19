@@ -13,3 +13,5 @@ fpm_address: /run/php/php8.3-fpm.sock
 
 timeout_sec: 30
 max_queue: 10
+max_retries: 3
+retry_delay_ms: 2000

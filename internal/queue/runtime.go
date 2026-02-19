@@ -1,26 +1,27 @@
 package queue
 
 import (
-	"bytes"
-	"context"
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"io"
-	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
+    "bytes"
+    "context"
+    "encoding/binary"
+    "errors"
+    "fmt"
+    "io"
+    "net"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "strconv"
+    "strings"
+    "sync"
+    "sync/atomic"
+    "time"
 
-	"go-web-server/internal/config"
-	"go-web-server/internal/validate"
-	"go-web-server/internal/storage"
+    "go-web-server/internal/config"
+    "go-web-server/internal/storage"
+    "go-web-server/internal/validate"
 
-	"go.uber.org/zap"
+    "go.uber.org/zap"
 )
 
 type Job struct {
@@ -40,100 +41,100 @@ type Result struct {
 	Queue      string
 	MsgID      string
 	ExitCode   int
-	Stdout     []byte
-	Stderr     []byte
 	DurationMs int64
 	Err        error
+	Stdout     []byte
+	Stderr     []byte
 }
 
 type Runner interface {
-	Run(ctx context.Context, rt *Runtime, job Job) Result
+	Run(ctx context.Context, cmdArgs []string, script string, job Job) Result
 }
 
 // ========================= Exec (php-cgi, anything executable) =========================
 
 type ExecRunner struct{}
 
-func (ExecRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
-	start := time.Now()
+func (ExecRunner) Run(ctx context.Context, cmdArgs []string, script string, job Job) Result {
+    start := time.Now()
 
-	if len(rt.Command) == 0 {
-		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
-			ExitCode:   1,
-			Err:        fmt.Errorf("no command configured for queue %q", rt.Cfg.Name),
-			DurationMs: time.Since(start).Milliseconds(),
-		}
-	}
+    // 1. Проверка команды
+    if len(cmdArgs) == 0 {
+        return Result{
+            Queue:      job.Queue,
+            MsgID:      job.MsgID,
+            ExitCode:   1,
+            Err:        fmt.Errorf("no command provided"),
+            DurationMs: time.Since(start).Milliseconds(),
+        }
+    }
 
-	// IMPORTANT: php-fpm is not an executable job. It must use FastCGI runner.
-	if rt.Command[0] == "php-fpm" {
-		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
-			ExitCode:   1,
-			Err:        fmt.Errorf("php-fpm must be executed via FastCGIRunner (FastCGI protocol), not ExecRunner"),
-			DurationMs: time.Since(start).Milliseconds(),
-		}
-	}
+    // 2. Запрет php-fpm здесь (он должен идти через FastCGIRunner)
+    if cmdArgs[0] == "php-fpm" {
+        return Result{
+            Queue:      job.Queue,
+            MsgID:      job.MsgID,
+            ExitCode:   1,
+            Err:        fmt.Errorf("php-fpm must be executed via FastCGIRunner, not ExecRunner"),
+            DurationMs: time.Since(start).Milliseconds(),
+        }
+    }
 
-	cmd := exec.CommandContext(ctx, rt.Command[0], rt.Command[1:]...)
-	cmd.Stdin = bytes.NewReader(job.Body)
+    // 3. Создаем команду ОС
+    // Используем cmdArgs[0] как исполняемый файл, остальное как аргументы
+    cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+    cmd.Stdin = bytes.NewReader(job.Body)
 
-	// CGI mode logic for php-cgi
-	if rt.Command[0] == "php-cgi" {
-		env, err := rt.buildPhpEnv(job)
-		if err != nil {
-			return Result{
-				Queue:      job.Queue,
-				MsgID:      job.MsgID,
-				ExitCode:   1,
-				Err:        err,
-				DurationMs: time.Since(start).Milliseconds(),
-			}
-		}
-		cmd.Env = append(os.Environ(), env...)
-	}
+    // 4. Логика для php-cgi (подготовка окружения)
+    if cmdArgs[0] == "php-cgi" {
+        env, err := buildPhpEnvStandalone(script, job) 
+        if err != nil {
+            return Result{
+                Queue: job.Queue, MsgID: job.MsgID, ExitCode: 1, Err: err,
+                DurationMs: time.Since(start).Milliseconds(),
+            }
+        }
+        cmd.Env = append(os.Environ(), env...)
+    }
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout = &stdout
+    cmd.Stderr = &stderr
 
-	err := cmd.Run()
+    // 5. Запуск
+    err := cmd.Run()
 
-	exitCode := 0
-	if err != nil {
-		exitCode = 1
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			exitCode = ee.ExitCode()
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			exitCode = 124
-			err = errors.New("timeout exceeded")
-		}
-	}
+    exitCode := 0
+    if err != nil {
+        exitCode = 1
+        var ee *exec.ExitError
+        if errors.As(err, &ee) {
+            exitCode = ee.ExitCode()
+        }
+        if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+            exitCode = 124
+            err = errors.New("timeout exceeded")
+        }
+    }
 
-	outBytes := stdout.Bytes()
+    outBytes := stdout.Bytes()
 
-	// php-cgi stdout contains headers+body
-	if rt.Command[0] == "php-cgi" {
-		_, bodyOnly := splitCGI(outBytes)
-		outBytes = bodyOnly
-	}
+    // 6. Пост-обработка для php-cgi (отрезаем HTTP-заголовки)
+    if cmdArgs[0] == "php-cgi" {
+        _, bodyOnly := splitCGI(outBytes)
+        outBytes = bodyOnly
+    }
 
-	return Result{
-		Queue:      job.Queue,
-		MsgID:      job.MsgID,
-		ExitCode:   exitCode,
-		Stdout:     outBytes,
-		Stderr:     stderr.Bytes(),
-		DurationMs: time.Since(start).Milliseconds(),
-		Err:        err,
-	}
+    return Result{
+        Queue:      job.Queue,
+        MsgID:      job.MsgID,
+        ExitCode:   exitCode,
+        Stdout:     outBytes,
+        Stderr:     stderr.Bytes(),
+        DurationMs: time.Since(start).Milliseconds(),
+        Err:        err,
+    }
 }
-
 // ========================= FastCGI (php-fpm) =========================
 
 type FastCGIRunner struct {
@@ -175,16 +176,16 @@ type fcgiBeginRequestBody struct {
 	Reserved [5]uint8
 }
 
-func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
+func (r FastCGIRunner) Run(ctx context.Context, _ []string, script string, job Job) Result {
 	start := time.Now()
 
-	// basic validation
-	if strings.TrimSpace(rt.ScriptPath) == "" {
+	// 1) validate inputs
+	if strings.TrimSpace(script) == "" {
 		return Result{
 			Queue:      job.Queue,
 			MsgID:      job.MsgID,
 			ExitCode:   1,
-			Err:        fmt.Errorf("no script configured for queue %q", rt.Cfg.Name),
+			Err:        fmt.Errorf("no script path provided for FastCGI"),
 			DurationMs: time.Since(start).Milliseconds(),
 		}
 	}
@@ -193,13 +194,13 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 			Queue:      job.Queue,
 			MsgID:      job.MsgID,
 			ExitCode:   1,
-			Err:        fmt.Errorf("php-fpm selected but FPMNetwork/FPMAddress not set for queue %q", rt.Cfg.Name),
+			Err:        fmt.Errorf("FPM network/address not configured"),
 			DurationMs: time.Since(start).Milliseconds(),
 		}
 	}
 
-	// Build CGI/FastCGI env
-	envList, err := rt.buildPhpEnv(job)
+	// 2) build CGI/FastCGI env list (K=V)
+	envList, err := buildPhpEnvStandalone(script, job)
 	if err != nil {
 		return Result{
 			Queue:      job.Queue,
@@ -210,7 +211,7 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 		}
 	}
 
-	// Convert "K=V" to map
+	// 3) convert "K=V" to map
 	params := make(map[string]string, len(envList)+8)
 	for _, kv := range envList {
 		if i := strings.IndexByte(kv, '='); i > 0 {
@@ -218,13 +219,13 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 		}
 	}
 
-	// Some commonly expected params (harmless if extra)
+	// 4) some commonly expected params (harmless if extra)
 	params["SERVER_NAME"] = "queue-service"
 	params["SERVER_PORT"] = "80"
-	params["REQUEST_URI"] = "/" + job.Queue + "/job" // not used by PHP typically, but fine
-	params["DOCUMENT_ROOT"] = filepath.Dir(rt.ScriptPath)
+	params["REQUEST_URI"] = "/" + job.Queue + "/job"
+	params["DOCUMENT_ROOT"] = filepath.Dir(script)
 
-	// Connect
+	// 5) connect to php-fpm
 	d := net.Dialer{}
 	conn, err := d.DialContext(ctx, r.Network, r.Address)
 	if err != nil {
@@ -238,7 +239,7 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 	}
 	defer conn.Close()
 
-	// Respect context deadline for read/write
+	// respect context deadline for read/write
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
@@ -250,7 +251,6 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 	var brBuf [8]byte
 	binary.BigEndian.PutUint16(brBuf[0:2], br.Role)
 	brBuf[2] = br.Flags
-	// reserved already zero
 	if err := fcgiWriteRecord(conn, fcgiBeginRequest, reqID, brBuf[:]); err != nil {
 		return fcgiErr(job, start, err)
 	}
@@ -297,7 +297,7 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 			return fcgiErr(job, start, err)
 		}
 
-		// Only care about our request id
+		// only care about our request id
 		if h.RequestID != reqID {
 			continue
 		}
@@ -315,8 +315,6 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 			// content: appStatus(4) + protocolStatus(1) + reserved(3)
 			if len(content) >= 5 {
 				appExit = int(binary.BigEndian.Uint32(content[0:4]))
-				// protocolStatus := content[4]
-				_ = appExit
 			}
 			goto DONE
 		default:
@@ -327,27 +325,21 @@ func (r FastCGIRunner) Run(ctx context.Context, rt *Runtime, job Job) Result {
 DONE:
 	outBytes := outStdout.Bytes()
 
-	// php-fpm stdout is also headers+body (CGI-style)
+	// php-fpm stdout is headers+body (CGI-style)
 	_, bodyOnly := splitCGI(outBytes)
-	outBytes = bodyOnly
 
 	exitCode := 0
 	var runErr error
 	if appExit != 0 {
-		// treat non-zero as failure; keep stderr for details
 		exitCode = appExit
 		runErr = fmt.Errorf("php exited with status %d", appExit)
-	}
-	// If FPM wrote to stderr, keep it; not necessarily fatal.
-	if runErr == nil && outStderr.Len() > 0 {
-		// keep non-fatal; leave Err=nil, but you may choose to set warning elsewhere
 	}
 
 	return Result{
 		Queue:      job.Queue,
 		MsgID:      job.MsgID,
 		ExitCode:   exitCode,
-		Stdout:     outBytes,
+		Stdout:     bodyOnly,
 		Stderr:     outStderr.Bytes(),
 		DurationMs: time.Since(start).Milliseconds(),
 		Err:        runErr,
@@ -508,48 +500,6 @@ func fcgiReadRecord(r io.Reader) (fcgiHeader, []byte, error) {
 	return h, content, nil
 }
 
-// ========================= Runtime =========================
-
-func (rt *Runtime) buildPhpEnv(job Job) ([]string, error) {
-	if strings.TrimSpace(rt.ScriptPath) == "" {
-		return nil, fmt.Errorf("no script configured for queue %q", rt.Cfg.Name)
-	}
-
-	method := strings.TrimSpace(job.Method)
-	if method == "" {
-		method = "POST"
-	}
-
-	ct := strings.TrimSpace(job.ContentType)
-	if ct == "" {
-		ct = "application/json"
-	}
-
-	remote := stripPort(job.RemoteAddr)
-
-	env := []string{
-		"GATEWAY_INTERFACE=CGI/1.1",
-		"SERVER_PROTOCOL=HTTP/1.1",
-		"REQUEST_METHOD=" + method,
-		"SCRIPT_FILENAME=" + rt.ScriptPath,
-		"SCRIPT_NAME=" + filepath.Base(rt.ScriptPath),
-		"QUERY_STRING=" + job.QueryString,
-		"CONTENT_TYPE=" + ct,
-		"CONTENT_LENGTH=" + strconv.Itoa(len(job.Body)),
-		"REMOTE_ADDR=" + remote,
-		"REDIRECT_STATUS=200",
-		"MSG_ID=" + job.MsgID,
-		"QUEUE=" + job.Queue,
-		"ATTEMPT=" + strconv.Itoa(job.Attempt),
-	}
-
-	if k := strings.TrimSpace(job.IdempotencyKey); k != "" {
-		env = append(env, "HTTP_IDEMPOTENCY_KEY="+k)
-	}
-
-	return env, nil
-}
-
 type runtimeState struct {
 	jobs    chan Job
 	quit    chan struct{}
@@ -557,12 +507,15 @@ type runtimeState struct {
 	runner  Runner
 	timeout time.Duration
 	log     *zap.Logger
+
+	stopOnce sync.Once
+	stopped  atomic.Bool
 }
 
 type Runtime struct {
+	mu sync.RWMutex
 	Cfg    config.QueueConfig
 	Schema *validate.CompiledSchema
-
 	Command    []string // ["php-cgi"] or ["php-fpm"]
 	ScriptPath string
 
@@ -624,28 +577,72 @@ func (rt *Runtime) initIfNeeded(baseLog *zap.Logger) error {
 
 	for wid := 1; wid <= workers; wid++ {
 		rt.st.wg.Add(1)
-		go rt.workerLoop(wid)
+		go rt.workerLoop(wid)//запуск как фоновая задача
 	}
 
-	rt.st.log.Info("queue_started",
-		zap.Int("workers", workers),
-		zap.Int("max_queue", maxQueue),
-		zap.Int64("timeout_ms", timeout.Milliseconds()),
-		zap.String("runner", fmt.Sprintf("%T", runner)),
-	)
+	rt.st.wg.Add(1)
+	go rt.maintenanceLoop()
 
+
+	rt.st.log.Info("queue_started",
+    zap.Int("workers", workers),
+    zap.Int("max_queue", maxQueue),
+    zap.Int64("timeout_ms", timeout.Milliseconds()),
+    zap.String("runner", fmt.Sprintf("%T", runner)),
+    zap.Int("max_retries", rt.Cfg.MaxRetries),
+    zap.Int("retry_delay_ms", rt.Cfg.RetryDelayMs),
+)
 	return nil
 }
-
-func (rt *Runtime) Enqueue(job Job) error {
+func (rt *Runtime) Enqueue(ctx context.Context, job Job) (err error) {
 	if rt.st == nil {
 		return fmt.Errorf("runtime not initialized for queue %q", rt.Cfg.Name)
 	}
+
+	// 1) Быстрая проверка
+	if rt.st.stopped.Load() {
+		return fmt.Errorf("queue %q is stopped", rt.Cfg.Name)
+	}
+	if e := ctx.Err(); e != nil {
+		return e
+	}
+
+	// Защита от panic при send в закрытый канал
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("queue %q is closing/stopped", rt.Cfg.Name)
+		}
+	}()
+
+	// 2) Быстрая попытка без ожидания
 	select {
 	case rt.st.jobs <- job:
 		return nil
 	default:
-		return fmt.Errorf("queue %q is full", rt.Cfg.Name)
+		// очередь заполнена — пойдём в ожидание ниже
+		rt.st.log.Warn("queue_full_waiting_enqueue",
+			zap.String("queue", rt.Cfg.Name),
+			zap.String("msg_id", job.MsgID),
+			zap.Int("attempt", job.Attempt),
+		)
+	}
+
+	// 3) Ограниченное ожидание (100ms) или отмена контекста
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case rt.st.jobs <- job:
+		return nil
+
+	case <-ctx.Done():
+		return ctx.Err()
+
+	case <-rt.st.quit:
+		return fmt.Errorf("queue %q is stopped", rt.Cfg.Name)
+
+	case <-timer.C:
+		return fmt.Errorf("queue %q is full and busy", rt.Cfg.Name)
 	}
 }
 
@@ -653,37 +650,178 @@ func (rt *Runtime) Stop() {
 	if rt.st == nil {
 		return
 	}
-	close(rt.st.quit)
+
+	rt.st.stopOnce.Do(func() {
+		rt.st.stopped.Store(true)
+		close(rt.st.quit)      // сигнал всем выйти
+		// НЕ закрываем jobs здесь!
+	})
+
 	rt.st.wg.Wait()
+
+	// теперь точно нет воркеров/планировщиков, которые могли бы писать в jobs
+	// закрывать jobs можно, но не обязательно
+	// close(rt.st.jobs)
+
 	rt.st.log.Info("queue_stopped")
 }
 
+
 func (rt *Runtime) workerLoop(workerID int) {
 	defer rt.st.wg.Done()
+
+	// Объявляем scheduleRetry как анонимную функцию (замыкание) внутри воркера
+	scheduleRetry := func(job Job) {
+		delay := time.Duration(rt.Cfg.RetryDelayMs) * time.Millisecond
+		if delay <= 0 {
+			select {
+			case <-rt.st.quit:
+				return
+			case rt.st.jobs <- job:
+				return
+			}
+		}
+
+		rt.st.wg.Add(1)
+		go func() {
+			defer rt.st.wg.Done()
+			t := time.NewTimer(delay)
+			defer t.Stop()
+
+			select {
+			case <-rt.st.quit:
+				return
+			case <-t.C:
+			}
+
+			select {
+			case <-rt.st.quit:
+				return
+			case rt.st.jobs <- job:
+				rt.st.log.Info("job_requeued",
+					zap.String("msg_id", job.MsgID),
+					zap.Int("attempt", job.Attempt),
+					zap.Int64("retry_delay_ms", int64(delay/time.Millisecond)),
+				)
+			}
+		}()
+	}
 
 	for {
 		select {
 		case <-rt.st.quit:
 			return
+
 		case job, ok := <-rt.st.jobs:
 			if !ok {
 				return
 			}
+
+			// 1) MarkProcessing
+			if rt.Store != nil {
+				if err := rt.Store.MarkProcessing(job.MsgID, job.Attempt); err != nil {
+					rt.st.log.Warn("mark_processing_failed",
+						zap.String("msg_id", job.MsgID),
+						zap.Int("worker_id", workerID),
+						zap.Error(err),
+					)
+					continue
+				}
+
+				rt.st.log.Info("mark_processing_ok",
+					zap.String("msg_id", job.MsgID),
+					zap.Int("worker_id", workerID),
+					zap.Int("attempt", job.Attempt),
+				)
+			}
+
+			// 2) Снапшот конфига
+			rt.mu.RLock()
+			currentCmd := append([]string(nil), rt.Command...)
+			scriptPath := rt.ScriptPath
+			rt.mu.RUnlock()
+
+			// 3) Выполнение под таймаутом
 			ctx, cancel := context.WithTimeout(context.Background(), rt.st.timeout)
-			res := rt.st.runner.Run(ctx, rt, job)
+			res := rt.st.runner.Run(ctx, currentCmd, scriptPath, job)
 			cancel()
 
+			rt.appendStdStreams(job, res.Stdout, res.Stderr)
+
+			failed := (res.ExitCode != 0 || res.Err != nil)
+
+			// 4) Проверка на Retry
+			if failed && job.Attempt < rt.Cfg.MaxRetries {
+				if rt.Store != nil {
+					if err := rt.Store.RequeueForRetry(job.MsgID, time.Now().UnixMilli()); err == nil {
+						next := job
+						next.Attempt = job.Attempt + 1
+						scheduleRetry(next)
+
+						rt.st.log.Warn("job_retry_scheduled",
+							zap.String("msg_id", job.MsgID),
+							zap.Int("worker_id", workerID),
+							zap.Int("from_attempt", job.Attempt),
+							zap.Int("to_attempt", next.Attempt),
+							zap.Int("exit_code", res.ExitCode),
+							zap.String("err", errString(res.Err)),
+						)
+						continue // Переходим к следующей задаче, не вызывая MarkDone
+					}
+					// Если Requeue в базу не удался, падаем ниже в MarkDone(Failed)
+				}
+			}
+
+			// 5) Финализация (если не ретрай или ретраи кончились)
+			status := storage.StatusSucceeded
+			if failed {
+				status = storage.StatusFailed
+			}
+
+			if rt.Store != nil {
+				ttlMs := time.Now().Add(10 * time.Minute).UnixMilli()
+
+				err := rt.Store.MarkDone(
+					job.MsgID,
+					status,
+					storage.Result{
+						FinishedAt: time.Now().UnixMilli(),
+						ExitCode:   res.ExitCode,
+						DurationMs: res.DurationMs,
+						Err:        errString(res.Err),
+					},
+					ttlMs,
+				)
+
+				if err != nil {
+					rt.st.log.Warn("mark_done_failed",
+						zap.String("msg_id", job.MsgID),
+						zap.Int("attempt", job.Attempt),
+						zap.String("final_status", string(status)),
+						zap.Error(err),
+					)
+				} else {
+					rt.st.log.Info("mark_done_ok",
+						zap.String("msg_id", job.MsgID),
+						zap.Int("attempt", job.Attempt),
+						zap.String("final_status", string(status)),
+						zap.Int("exit_code", res.ExitCode),
+						zap.Int64("duration_ms", res.DurationMs),
+						zap.Int64("ttl_ms", ttlMs),
+					)
+				}
+			}
+
+			// 6) Лог
 			fields := []zap.Field{
 				zap.String("msg_id", job.MsgID),
 				zap.Int("worker_id", workerID),
 				zap.Int("exit_code", res.ExitCode),
 				zap.Int("attempt", job.Attempt),
 				zap.Int64("duration_ms", res.DurationMs),
-				zap.String("cmd", safeCmd(rt.Command)),
 			}
-
 			if res.Err != nil {
-				fields = append(fields, zap.String("err", res.Err.Error()))
+				fields = append(fields, zap.Error(res.Err))
 				rt.st.log.Warn("job_done", fields...)
 			} else {
 				rt.st.log.Info("job_done", fields...)
@@ -692,7 +830,120 @@ func (rt *Runtime) workerLoop(workerID int) {
 	}
 }
 
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func (rt *Runtime) appendStdStreams(job Job, out, errb []byte) {
+	if len(out) == 0 && len(errb) == 0 {
+		return
+	}
+
+	dir := filepath.Join("configs/scripts/logs", job.Queue)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		rt.st.log.Warn("mkdir_job_log_dir_failed", zap.Error(err))
+		return
+	}
+
+	logPath := filepath.Join(dir, job.MsgID+".log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		rt.st.log.Warn("open_job_log_failed", zap.String("path", logPath), zap.Error(err))
+		return
+	}
+	defer f.Close()
+
+	_, _ = fmt.Fprintf(f, "\n=== ATTEMPT %d @ %s ===\n", job.Attempt, time.Now().Format(time.RFC3339))
+
+	if len(out) > 0 {
+		_, _ = f.WriteString("=== STDOUT ===\n")
+		_, _ = f.Write(out)
+		if out[len(out)-1] != '\n' {
+			_, _ = f.WriteString("\n")
+		}
+	}
+	if len(errb) > 0 {
+		_, _ = f.WriteString("=== STDERR ===\n")
+		_, _ = f.Write(errb)
+		if errb[len(errb)-1] != '\n' {
+			_, _ = f.WriteString("\n")
+		}
+	}
+}
+
+func (rt *Runtime) maintenanceLoop() {
+	defer rt.st.wg.Done()
+
+	requeueTicker := time.NewTicker(15 * time.Second) // RequeueStuck
+	gcTicker := time.NewTicker(1 * time.Minute)       // GC
+	defer requeueTicker.Stop()
+	defer gcTicker.Stop()
+
+	for {
+		select {
+		case <-rt.st.quit:
+			return
+
+		case <-requeueTicker.C:
+			if rt.Store != nil {
+				n, err := rt.Store.RequeueStuck(0, 200)
+				if err != nil {
+					rt.st.log.Warn("requeue_stuck_failed", zap.Error(err))
+				} else if n > 0 {
+					rt.st.log.Info("requeue_stuck_done", zap.Int("count", n))
+				}
+			}
+
+		case <-gcTicker.C:
+			if rt.Store != nil {
+				n, err := rt.Store.GC(0, 500)
+				if err != nil {
+					rt.st.log.Warn("gc_failed", zap.Error(err))
+				} else if n > 0 {
+					rt.st.log.Info("gc_done", zap.Int("deleted", n))
+				}
+			}
+		}
+	}
+}
+
 // ========================= helpers =========================
+func buildPhpEnvStandalone(scriptPath string, job Job) ([]string, error) {
+    if strings.TrimSpace(scriptPath) == "" {
+        return nil, fmt.Errorf("no script path provided")
+    }
+
+    method := job.Method
+    if method == "" { method = "POST" }
+
+    ct := job.ContentType
+    if ct == "" { ct = "application/json" }
+
+    env := []string{
+        "GATEWAY_INTERFACE=CGI/1.1",
+        "SERVER_PROTOCOL=HTTP/1.1",
+        "REQUEST_METHOD=" + method,
+        "SCRIPT_FILENAME=" + scriptPath,
+        "SCRIPT_NAME=" + filepath.Base(scriptPath),
+        "QUERY_STRING=" + job.QueryString,
+        "CONTENT_TYPE=" + ct,
+        "CONTENT_LENGTH=" + strconv.Itoa(len(job.Body)),
+        "REMOTE_ADDR=" + stripPort(job.RemoteAddr),
+        "REDIRECT_STATUS=200",
+        "MSG_ID=" + job.MsgID,
+        "QUEUE=" + job.Queue,
+        "ATTEMPT=" + strconv.Itoa(job.Attempt),
+    }
+    
+    if job.IdempotencyKey != "" {
+        env = append(env, "HTTP_IDEMPOTENCY_KEY="+job.IdempotencyKey)
+    }
+
+    return env, nil
+}
 
 func stripPort(addr string) string {
 	if addr == "" {

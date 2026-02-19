@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,17 +9,21 @@ import (
 	"os"
 	"strings"
 	"time"
+	"strconv"
 
 	"go-web-server/internal/httpserver"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	storage "go-web-server/internal/storage"
 )
 
 const (
 	headerIdempotencyKey = "Idempotency-Key"
 	cmdNewMessage        = "newmessage"
 	maxBodyBytes         = 1 << 20 // 1 MiB
+	cmdGetInfo    = "info"
+	cmdGetInfoAll = "info_all"
 )
 
 func newUUIDv7String() (string, error) {
@@ -169,7 +174,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 
 	// 5) schema validate
 	if err := rt.Schema.ValidateJSON(payload); err != nil {
-		status := http.StatusUnprocessableEntity
+		status := http.StatusUnprocessableEntity//422
 		m.log.Warn("queue_new_message_rejected",
 			append(baseRequestFields(status),
 				zap.String("reason", "schema_validation_failed"),
@@ -183,7 +188,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 	// 6) generate msg id (candidate)
 	msgID, err := newUUIDv7String()
 	if err != nil {
-		status := http.StatusInternalServerError
+		status := http.StatusInternalServerError//500
 		m.log.Error("msg_id_generation_failed",
 			append(baseRequestFields(status), zap.Error(err))...,
 		)
@@ -202,31 +207,41 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		)
 	}
 
-	// 7) store (dedup barrier)
-	effectiveMsgID := msgID
-	created := true
-	if rt.Store != nil {
-		storedMsgID, wasCreated, err := rt.Store.PutNewMessage(
-			queueName,
-			msgID,
-			body, // raw payload bytes
-			idemKey,
-			time.Now().UnixMilli(),
-			expiresAtMs,
-		)
-		if err != nil {
-			status := http.StatusInternalServerError
-			m.log.Error("storage_put_failed",
-				append(baseJobFields(status, msgID), zap.Error(err))...,
-			)
-			http.Error(w, "internal error", status)
-			return
-		}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+    defer cancel()
 
-		effectiveMsgID = storedMsgID
-		created = wasCreated
+    // 7) store (dedup barrier)
+    effectiveMsgID := msgID
+    created := true
+    if rt.Store != nil {
+        // Передаем ctx в PutNewMessage (нужно будет обновить сигнатуру метода в Store)
+        storedMsgID, wasCreated, err := rt.Store.PutNewMessage(
+            ctx, // <-- Добавлен контекст
+            queueName,
+            msgID,
+            body,
+            idemKey,
+            time.Now().UnixMilli(),
+            expiresAtMs,
+        )
+        if err != nil {
+            status := http.StatusInternalServerError
+            // Если ошибка вызвана таймаутом контекста
+            if errors.Is(err, context.DeadlineExceeded) {
+                status = http.StatusGatewayTimeout
+            }
+            
+            m.log.Error("storage_put_failed",
+                append(baseJobFields(status, msgID), zap.Error(err))...,
+            )
+            http.Error(w, "storage operation timed out or failed", status)
+            return
+        }
 
-		if !created {
+        effectiveMsgID = storedMsgID
+        created = wasCreated
+
+        if !created {
 			// дубль: не enqueue, просто отдаем существующий msg_id
 			status := http.StatusAccepted
 			m.log.Info("queue_new_message_dedup",
@@ -257,24 +272,23 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		IdempotencyKey: idemKey,
 	}
 
-	if err := rt.Enqueue(job); err != nil {
-		st := http.StatusTooManyRequests
-		reason := "enqueue_failed"
-		if errors.Is(err, ErrUnknownQueue) {
-			st = http.StatusNotFound
-			reason = "unknown_queue"
-		}
+	if err := rt.Enqueue(ctx, job); err != nil { // <-- Добавлен контекст
+        st := http.StatusTooManyRequests
+        if errors.Is(err, context.DeadlineExceeded) {
+            st = http.StatusGatewayTimeout
+        } else if errors.Is(err, ErrUnknownQueue) {
+            st = http.StatusNotFound
+        }
 
-		m.log.Warn("queue_new_message_rejected",
-			append(baseJobFields(st, effectiveMsgID),
-				zap.String("reason", reason),
-				zap.Error(err),
-				zap.Int("payload_bytes", payloadBytes),
-			)...,
-		)
-		http.Error(w, err.Error(), st)
-		return
-	}
+        m.log.Warn("queue_new_message_rejected",
+            append(baseJobFields(st, effectiveMsgID),
+                zap.String("reason", "enqueue_failed"),
+                zap.Error(err),
+            )...,
+        )
+        http.Error(w, err.Error(), st)
+        return
+    }
 
 	status := http.StatusAccepted
 	m.log.Info("queue_new_message_accepted",
@@ -288,17 +302,278 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte("accepted"))
 	return
+}
 
-status = http.StatusAccepted
-m.log.Info("queue_new_message_accepted",
-	append(baseJobFields(status, effectiveMsgID),
-		zap.Int("payload_bytes", payloadBytes),
-		// (опционально) zap.Bool("idempotency_generated", idemGenerated),
-	)...,
+func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
+    rt, ok := m.Get(queueName)
+    if !ok || rt.Store == nil {
+        http.Error(w, "unknown queue", http.StatusNotFound)
+        return
+    }
+
+    // защита: токен воркера
+    token := r.Header.Get("X-Worker-Token")
+    if token == "" || token != os.Getenv("WORKER_TOKEN") {
+        http.Error(w, "forbidden", http.StatusForbidden)
+        return
+    }
+
+    defer func() { _ = r.Body.Close() }()
+
+    var res storage.Result
+    dec := json.NewDecoder(r.Body)
+    if err := dec.Decode(&res); err != nil && !errors.Is(err, io.EOF) {
+        http.Error(w, "invalid json", http.StatusBadRequest)
+        return
+    }
+
+    // статус по результату (пример)
+    st := storage.StatusSucceeded
+    if res.ExitCode != 0 {
+        st = storage.StatusFailed
+    }
+
+    if err := rt.Store.MarkDone(msgID, st, res, res.DurationMs); err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    w.WriteHeader(http.StatusNoContent)
+}
+
+const (
+    cmdGetStatus = "status"
+    cmdGetResult = "result"
 )
 
-w.Header().Set("X-Message-Id", msgID)
-w.Header().Set("Idempotency-Key", idemKey)
-w.WriteHeader(status)
-_, _ = w.Write([]byte("accepted"))
+func (m *Manager) HandleGetStatus(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
+    start := time.Now()
+    requestID := httpserver.GetRequestID(r.Context())
+
+    base := func(status int) []zap.Field {
+        return []zap.Field{
+            zap.String("request_id", requestID),
+            zap.String("queue", queueName),
+            zap.String("cmd", cmdGetStatus),
+            zap.Int("status", status),
+            zap.Int64("duration_ms", time.Since(start).Milliseconds()),
+            zap.String("msg_id", msgID),
+        }
+    }
+
+    rt, ok := m.Get(queueName)
+    if !ok || rt.Store == nil {
+        st := http.StatusNotFound
+        m.log.Warn("queue_get_status_rejected", append(base(st),
+            zap.String("reason", "unknown_queue"),
+        )...)
+        http.Error(w, "unknown queue", st)
+        return
+    }
+
+    // если нет отдельного GetStatus — можно вызвать GetStatusAndResult и игнорить результат
+    status, _, err := rt.Store.GetStatusAndResult(msgID)
+    if err != nil && !errors.Is(err, storage.ErrNotReady) {
+        if errors.Is(err, storage.ErrNotFound) {
+            http.Error(w, "not found", http.StatusNotFound)
+            return
+        }
+        http.Error(w, "internal error", http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "msg_id": msgID,
+        "status": status,
+    })
+}
+
+func (m *Manager) HandleGetResult(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
+    start := time.Now()
+    requestID := httpserver.GetRequestID(r.Context())
+
+    base := func(status int) []zap.Field {
+        return []zap.Field{
+            zap.String("request_id", requestID),
+            zap.String("queue", queueName),
+            zap.String("cmd", cmdGetResult),
+            zap.Int("status", status),
+            zap.Int64("duration_ms", time.Since(start).Milliseconds()),
+            zap.String("msg_id", msgID),
+        }
+    }
+
+    rt, ok := m.Get(queueName)
+    if !ok || rt.Store == nil {
+        st := http.StatusNotFound
+        m.log.Warn("queue_get_result_rejected", append(base(st),
+            zap.String("reason", "unknown_queue"),
+        )...)
+        http.Error(w, "unknown queue", st)
+        return
+    }
+
+    status, res, err := rt.Store.GetStatusAndResult(msgID)
+    if err != nil {
+        if errors.Is(err, storage.ErrNotFound) {
+            http.Error(w, "not found", http.StatusNotFound)
+            return
+        }
+        if errors.Is(err, storage.ErrNotReady) {
+            // 202: ещё не готово
+            st := http.StatusAccepted
+            m.log.Info("queue_get_result_not_ready", base(st)...)
+
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(st)
+            _ = json.NewEncoder(w).Encode(map[string]any{
+                "msg_id": msgID,
+                "status": status,
+            })
+            return
+        }
+        http.Error(w, "internal error", http.StatusInternalServerError)
+        return
+    }
+
+    // 200: готово
+    st := http.StatusOK
+    m.log.Info("queue_get_result_ok", base(st)...)
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "msg_id": msgID,
+        "status": status,
+        "result": res,
+    })
+}
+
+func (m *Manager) HandleGetInfo(queueName string, w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	requestID := httpserver.GetRequestID(r.Context())
+
+	// hours query param (?hours=6), default = 24
+	hoursStr := r.URL.Query().Get("hours")
+	hours := 24
+	if hoursStr != "" {
+		if h, err := strconv.Atoi(hoursStr); err == nil && h > 0 {
+			hours = h
+		}
+	}
+	fromTime := time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
+
+	base := func(status int) []zap.Field {
+		return []zap.Field{
+			zap.String("request_id", requestID),
+			zap.String("queue", queueName),
+			zap.String("cmd", cmdGetInfo),
+			zap.Int("status", status),
+			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
+		}
+	}
+
+	rt, ok := m.Get(queueName)
+	if !ok || rt.Store == nil {
+		st := http.StatusNotFound
+		m.log.Warn("queue_get_info_rejected",
+			append(base(st), zap.String("reason", "unknown_queue"))...,
+		)
+		http.Error(w, "unknown queue", st)
+		return
+	}
+
+	info, err := rt.Store.GetInfo(queueName, fromTime)
+	if err != nil {
+		st := http.StatusInternalServerError
+		m.log.Error("queue_get_info_failed",
+			append(base(st), zap.Error(err))...,
+		)
+		http.Error(w, "internal error", st)
+		return
+	}
+
+	st := http.StatusOK
+	m.log.Info("queue_get_info_ok",
+		append(base(st), zap.Int("hours", hours))...,
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(st)
+	_ = json.NewEncoder(w).Encode(info)
+}
+
+func (m *Manager) HandleGetInfoAll(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	requestID := httpserver.GetRequestID(r.Context())
+
+	base := func(status int) []zap.Field {
+		return []zap.Field{
+			zap.String("request_id", requestID),
+			zap.String("cmd", cmdGetInfoAll),
+			zap.Int("status", status),
+			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
+		}
+	}
+
+	if m.store == nil {
+		st := http.StatusServiceUnavailable
+		m.log.Warn("queue_get_info_all_rejected",
+			append(base(st), zap.String("reason", "storage_disabled"))...,
+		)
+		http.Error(w, "storage disabled", st)
+		return
+	}
+
+	fromTime := time.Now().Add(-24 * time.Hour).UnixMilli()
+
+	infos, err := m.store.GetInfoAll(fromTime)
+	if err != nil {
+		st := http.StatusInternalServerError
+		m.log.Error("queue_get_info_all_failed",
+			append(base(st), zap.Error(err))...,
+		)
+		http.Error(w, "internal error", st)
+		return
+	}
+
+	st := http.StatusOK
+	m.log.Info("queue_get_info_all_ok", base(st)...)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(st)
+	_ = json.NewEncoder(w).Encode(infos)
+}
+
+func (m *Manager) StartBackgroundTasks(ctx context.Context) {
+    ticker := time.NewTicker(1 * time.Minute)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            // Проходим по всем очередям и чистим их
+            for _, name := range m.ListNames() {
+                if rt, ok := m.Get(name); ok && rt.Store != nil {
+                    now := time.Now().UnixMilli()
+                    
+                    // 1. Возвращаем "протухшие" задачи в очередь
+                    requeued, _ := rt.Store.RequeueStuck(now, 100)
+                    
+                    // 2. Удаляем старый мусор
+                    deleted, _ := rt.Store.GC(now, 100)
+                    
+                    if requeued > 0 || deleted > 0 {
+                        m.log.Info("background_cleanup_done",
+                            zap.String("queue", name),
+                            zap.Int("requeued", requeued),
+                            zap.Int("deleted", deleted),
+                        )
+                    }
+                }
+            }
+        }
+    }
 }

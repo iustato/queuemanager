@@ -17,3 +17,5 @@ timeout_sec: 30
 
 # буфер очереди (должен быть > workers)
 max_queue: 10
+max_retries: 3
+retry_delay_ms: 2000

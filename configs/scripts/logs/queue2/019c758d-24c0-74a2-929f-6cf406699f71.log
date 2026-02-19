@@ -1,0 +1,9 @@
+
+=== ATTEMPT 1 @ 2026-02-19T12:58:30+02:00 ===
+=== STDOUT ===
+{"ok":true,"queue":"queue2","msg_id":"019c758d-24c0-74a2-929f-6cf406699f71","attempt":1}
+=== STDERR ===
+PHP message: PHP Fatal error:  Uncaught Error: Undefined constant "STDERR" in /mnt/c/Users/Den/Desktop/queue-service/configs/scripts/job.php:54
+Stack trace:
+#0 {main}
+  thrown in /mnt/c/Users/Den/Desktop/queue-service/configs/scripts/job.php on line 54

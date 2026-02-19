@@ -14,6 +14,9 @@ type QueueConfig struct {
 	// --- new ---
 	Idempotency IdempotencyConfig `yaml:"idempotency"`
 	Storage     StorageConfig     `yaml:"storage"`
+	
+	MaxRetries   int `yaml:"max_retries"`
+	RetryDelayMs int `yaml:"retry_delay_ms"`
 }
 
 type IdempotencyConfig struct {
