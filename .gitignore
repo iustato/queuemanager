@@ -1,0 +1,28 @@
+# Бинарные файлы и исполняемые файлы Go
+/cmd/server/server
+/cmd/load_test/load_test
+*.exe
+*.test
+*.prof
+
+# Базы данных и временные данные
+/data/*.db
+/data/*.db-journal
+/data/*.db-shm
+/data/*.db-wal
+
+# Логи (самая частая причина "Error during execution" из-за объема)
+*.log
+/configs/scripts/logs/**/*
+/internal/queue/configs/scripts/logs/**/*
+
+# Результаты тестов (если они слишком большие)
+# Если вы хотите, чтобы Claude их видел, не добавляйте их сюда, 
+# но если их десятки — лучше скрыть.
+# run_*.txt
+# result.txt
+
+# Системные файлы и зависимости
+.DS_Store
+node_modules/
+/vendor/

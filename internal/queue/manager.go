@@ -1,16 +1,17 @@
 package queue
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
-	"context"
-
+	"os"
+	"strings"
 
 	"go-web-server/internal/config"
-	"go-web-server/internal/validate"
 	"go-web-server/internal/storage"
+	"go-web-server/internal/validate"
 
 	"go.uber.org/zap"
 )
@@ -19,85 +20,87 @@ type Manager struct {
 	mu     sync.RWMutex
 	queues map[string]*Runtime
 	log    *zap.Logger
-	store *storage.Store
+	store  *storage.Store
+
+	workerToken   string
+	allowAutoIdem bool
+	service       *QueueService
 }
 
 func NewManager(logger *zap.Logger) *Manager {
 	return NewManagerWithStore(logger, nil)
 }
 
-
 func NewManagerWithStore(logger *zap.Logger, st *storage.Store) *Manager {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Manager{
+
+	m := &Manager{
 		queues: make(map[string]*Runtime),
 		log:    logger.Named("queue"),
 		store:  st,
 	}
+
+	// читаем env один раз
+	m.workerToken = os.Getenv("WORKER_TOKEN")
+	m.allowAutoIdem = os.Getenv("ALLOW_AUTO_IDEMPOTENCY") == "true"
+
+	// сервис тоже лучше инициализировать тут
+	m.service = NewQueueService(m)
+
+	return m
 }
 
-
 func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
-	if cfg.Name == "" {
-		return fmt.Errorf("queue name is empty")
-	}
-	if schema == nil {
-		return fmt.Errorf("schema is nil for queue %q", cfg.Name)
-	}
-
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if _, exists := m.queues[cfg.Name]; exists {
-		m.mu.Unlock()
 		return fmt.Errorf("queue %q already exists", cfg.Name)
 	}
 
-	rt := &Runtime{
-		Cfg:    cfg,
-		Schema: schema,
-		Store:  m.store,
+	rtStr := strings.TrimSpace(cfg.Runtime)
+
+	// "новые" допустимые значения runtime-kind
+	isKind := rtStr == string(RuntimePHPFPM) ||
+		rtStr == string(RuntimePHPCGI) ||
+		rtStr == string(RuntimeExec)
+
+	// Команда и scriptPath, которые реально пойдут в NewRuntime
+	cmd := cfg.Command
+	scriptPath := cfg.Script
+
+	// BACKWARD COMPAT:
+	// если runtime не kind и command не задана — runtime был командой (например "true" или "/bin/true")
+	if !isKind && len(cmd) == 0 && rtStr != "" {
+		cmd = []string{rtStr}
+		cfg.Runtime = string(RuntimeExec)
+		scriptPath = "" // для exec не нужен
 	}
 
-	// Значения из конфигурации YAML
-	rt.Command = []string{cfg.Runtime}
-	rt.ScriptPath = cfg.Script
-
-	// защита от зависания
-	if rt.Cfg.TimeoutSec <= 0 {
-		rt.Cfg.TimeoutSec = 10
-	}
-	if rt.Cfg.MaxQueue <= 0 {
-		rt.Cfg.MaxQueue = 100
+	rt, err := NewRuntime(
+		cfg,
+		m.store,
+		m.log,
+		schema,
+		cmd,
+		scriptPath,
+		cfg.FPMNetwork,
+		cfg.FPMAddress,
+	)
+	if err != nil {
+		return err
 	}
 
 	m.queues[cfg.Name] = rt
-	m.mu.Unlock()
 
-	// СНАЧАЛА лог регистрации (теперь он будет перед queue_started)
-	m.log.Info("queue_registered",
+	m.log.Info("queue_registered_and_started",
 		zap.String("queue", cfg.Name),
-		zap.String("schema_file", cfg.SchemaFile),
 		zap.Int("workers", cfg.Workers),
-		zap.Int("max_size", cfg.MaxSize),
 		zap.String("runtime", cfg.Runtime),
-		zap.String("script", cfg.Script),
-		zap.Int("timeout_sec", cfg.TimeoutSec),
-		zap.Int("max_queue", cfg.MaxQueue),
+		zap.Strings("command", cmd),
 	)
-
-	// ПОТОМ старт
-	if err := rt.initIfNeeded(m.log); err != nil {
-		m.mu.Lock()
-		delete(m.queues, cfg.Name)
-		m.mu.Unlock()
-
-		m.log.Error("queue_start_failed",
-			zap.String("queue", cfg.Name),
-			zap.Error(err),
-		)
-		return err
-	}
 
 	return nil
 }
@@ -117,128 +120,100 @@ func (m *Manager) ListNames() []string {
 	for name := range m.queues {
 		out = append(out, name)
 	}
-	return out//возвращает список имен очередей по ключу
+	return out
 }
 
 func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
-	if cfg.Name == "" {
-		return fmt.Errorf("queue name is empty")
-	}
-	if schema == nil {
-		return fmt.Errorf("schema is nil for queue %q", cfg.Name)
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Останавливаем старую очередь если есть
 	if old, ok := m.queues[cfg.Name]; ok && old != nil {
 		old.Stop()
 	}
 
-	rt := &Runtime{
-		Cfg:    cfg,
-		Schema: schema,
-		Store:  m.store, 
+	rtStr := strings.TrimSpace(cfg.Runtime)
+
+	isKind := rtStr == string(RuntimePHPFPM) ||
+		rtStr == string(RuntimePHPCGI) ||
+		rtStr == string(RuntimeExec)
+
+	cmd := cfg.Command
+	scriptPath := cfg.Script
+
+	// backward compat: runtime был командой (например "true")
+	if !isKind && len(cmd) == 0 && rtStr != "" {
+		cmd = []string{rtStr}
+		cfg.Runtime = string(RuntimeExec)
+		scriptPath = ""
 	}
 
-	if err := rt.initIfNeeded(m.log); err != nil {
-		//защита от подвешенного состояния
-		delete(m.queues, cfg.Name) 
-
-        return fmt.Errorf("failed to replace queue %q: %w", cfg.Name, err)
+	// создаем runtime
+	rt, err := NewRuntime(
+		cfg,
+		m.store,
+		m.log,
+		schema,
+		cmd,
+		scriptPath,
+		cfg.FPMNetwork,
+		cfg.FPMAddress,
+	)
+	if err != nil {
+		return err
 	}
 
 	m.queues[cfg.Name] = rt
-
-	m.log.Info("queue_replaced",
-		zap.String("queue", cfg.Name),
-		zap.String("schema_file", cfg.SchemaFile),
-	)
-
 	return nil
 }
 
 func (m *Manager) DeleteQueue(name string) {
 	m.mu.Lock()
-	rt := m.queues[name]
+	rt, ok := m.queues[name]
 	delete(m.queues, name)
 	m.mu.Unlock()
-	
-	//если очередь была удалена ранее
-	if rt != nil {
+
+	if ok && rt != nil {
 		rt.Stop()
 	}
-
 	m.log.Warn("queue_deleted", zap.String("queue", name))
 }
 
 var ErrUnknownQueue = errors.New("unknown queue")
 
+// ВНИМАНИЕ: В новом дизайне Runtime поля Command и ScriptPath неизменяемы (нет мьютекса mu внутри Runtime).
+// Чтобы изменить команду, нужно вызвать ReplaceQueue. 
+// Если это критично, нужно вернуть mu в Runtime, но лучше пересоздавать очередь.
+
 func (m *Manager) SetCommand(queueName string, cmd []string) error {
-    m.mu.Lock()
-    rt, ok := m.queues[queueName]
-    m.mu.Unlock() 
-
-    if !ok || rt == nil {
-        return ErrUnknownQueue
-    }
-
-    //Блокируем конкретный Runtime для записи команды
-    rt.mu.Lock() 
-    rt.Command = cmd
-    rt.mu.Unlock()
-
-    m.log.Info("queue_command_set",
-        zap.String("queue", queueName),
-        zap.String("cmd", safeCmd(cmd)),
-    )
-    return nil
+	// Для поддержки этого метода нужно либо возвращать mu в Runtime, 
+	// либо делать полную замену Runtime через ReplaceQueue.
+	return errors.New("SetCommand is deprecated, use ReplaceQueue")
 }
 
-// Добавили ctx в аргументы, чтобы передать его дальше в rt.Enqueue
 func (m *Manager) Enqueue(ctx context.Context, queueName, msgID string, body []byte) error {
-    m.mu.RLock()
-    rt, ok := m.queues[queueName]
-    m.mu.RUnlock()
+	m.mu.RLock()
+	rt, ok := m.queues[queueName]
+	m.mu.RUnlock()
 
-    if !ok || rt == nil {
-        return ErrUnknownQueue
-    }
+	if !ok || rt == nil {
+		return ErrUnknownQueue
+	}
 
-    job := Job{
-        Queue:      queueName,
-        MsgID:      msgID,
-        Body:       body,
-        EnqueuedAt: time.Now(),
-        Attempt:    1,
-    }
+	job := Job{
+		Queue:      queueName,
+		MsgID:      msgID,
+		Body:       body,
+		EnqueuedAt: time.Now(),
+		Attempt:    1,
+	}
 
-    // ИСПРАВЛЕНО: передаем значения ctx и job, а не типы
-    return rt.Enqueue(ctx, job)
-}
-
-func (m *Manager) SetScript(queueName, scriptPath string) error {
-    m.mu.Lock()
-    rt, ok := m.queues[queueName]
-    m.mu.Unlock()
-
-    if !ok || rt == nil {
-        return ErrUnknownQueue
-    }
-
-    rt.mu.Lock() 
-    rt.ScriptPath = scriptPath
-    rt.mu.Unlock()
-
-    m.log.Info("queue_script_set",
-        zap.String("queue", queueName),
-        zap.String("script", scriptPath),
-    )
-    return nil
+	return rt.Enqueue(ctx, job)
 }
 
 func (m *Manager) StopAll() {
 	m.mu.RLock()
+	// Копируем указатели, чтобы не держать замок менеджера во время остановок
 	rts := make([]*Runtime, 0, len(m.queues))
 	for _, rt := range m.queues {
 		if rt != nil {

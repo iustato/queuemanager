@@ -1,0 +1,3 @@
+go test ./internal/validate -v
+go test ./internal/storage -v
+go test ./internal/queue -v

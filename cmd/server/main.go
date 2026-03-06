@@ -143,6 +143,7 @@ func main() {
 			qm.HandleGetStatus(parts[0], parts[2], w, r)
 			return
 		}
+
 		if len(parts) == 3 && parts[1] == "result" {
 			if r.Method != http.MethodGet {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -204,11 +205,7 @@ func main() {
 		Handler:           internalHandler,
 	})
 
-	// --- background tasks + graceful shutdown ---
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go qm.StartBackgroundTasks(ctx)
-
+	// --- start servers ---
 	errCh := make(chan error, 2)
 
 	go func() {
@@ -221,6 +218,7 @@ func main() {
 		errCh <- internalSrv.ListenAndServe()
 	}()
 
+	// --- wait for signal or server error ---
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -233,9 +231,7 @@ func main() {
 		}
 	}
 
-	// stop background tasks
-	cancel()
-
+	// --- graceful shutdown ---
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
@@ -246,5 +242,6 @@ func main() {
 		logger.Error("internal shutdown failed", zap.Error(err))
 	}
 
+	// stop runtimes (workers + per-queue maintenance)
 	qm.StopAll()
 }

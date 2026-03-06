@@ -1,8 +1,0 @@
-=== JOB DONE ===
-=== STDOUT ===
-{"ok":true,"queue":"queue1","msg_id":"019c758d-0cd1-7ae7-af51-d9847e7e5178","attempt":2}
-
-=== STDERR ===
-forced fail on attempt=2
-
-

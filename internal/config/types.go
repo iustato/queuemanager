@@ -4,21 +4,25 @@ type QueueConfig struct {
 	Name       string `yaml:"name"`
 	SchemaFile string `yaml:"schema_file"`
 
-	MaxSize  int    `yaml:"max_size"`
-	Workers  int    `yaml:"workers"`
-	Runtime  string `yaml:"runtime"`
-	Script   string `yaml:"script"`
-	TimeoutSec int  `yaml:"timeout_sec"`
-	MaxQueue int    `yaml:"max_queue"`
+	MaxSize    int    `yaml:"max_size"`
+	Workers    int    `yaml:"workers"`
+	Runtime    string `yaml:"runtime"`
+	Script     string `yaml:"script"`
+	TimeoutSec int    `yaml:"timeout_sec"`
+	MaxQueue   int    `yaml:"max_queue"`
+	Command []string `json:"command,omitempty" yaml:"command,omitempty"`
+
+	// php-fpm options
+	FPMNetwork string `yaml:"fpm_network"`
+	FPMAddress string `yaml:"fpm_address"`
 
 	// --- new ---
 	Idempotency IdempotencyConfig `yaml:"idempotency"`
 	Storage     StorageConfig     `yaml:"storage"`
-	
+
 	MaxRetries   int `yaml:"max_retries"`
 	RetryDelayMs int `yaml:"retry_delay_ms"`
 }
-
 type IdempotencyConfig struct {
 	// UUIDv7 старше этого возраста — отклоняем (400)
 	AcceptMaxAge string `yaml:"accept_max_age"` // пример: "30d" или "720h"
