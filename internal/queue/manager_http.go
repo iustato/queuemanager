@@ -12,6 +12,7 @@ import (
 	"time"
 	"fmt"
 
+	"go-web-server/internal/config"
 	"go-web-server/internal/storage"
 )
 
@@ -323,7 +324,13 @@ func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWrite
 
 	ttl := p.TTLms
 	if ttl == 0 {
-		ttl = time.Now().Add(10 * time.Minute).UnixMilli()
+		defaultTTL := 10 * time.Minute
+		if rt, ok := m.Get(queueName); ok && rt != nil {
+			if parsed, err := config.ParseDurationExt(rt.Cfg.ResultTTL); err == nil && parsed > 0 {
+				defaultTTL = parsed
+			}
+		}
+		ttl = time.Now().Add(defaultTTL).UnixMilli()
 	}
 
 	if err := m.store.MarkDone(msgID, status, storage.Result{

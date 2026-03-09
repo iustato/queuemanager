@@ -10,8 +10,16 @@ import (
 type RunnerFactory func() (Runner, error)
 
 // DefaultRunnerFactory returns a factory based on runtime settings.
-// It closes over rt (kind/fpm/script/command).
+// It closes over rt (kind/fpm/script/command) and reads buffer/timeout
+// settings from rt.Cfg.
 func DefaultRunnerFactory(rt *Runtime) RunnerFactory {
+	cfg := rt.Cfg
+
+	truncate := false
+	if cfg.TruncateOnLimit != nil {
+		truncate = *cfg.TruncateOnLimit
+	}
+
 	return func() (Runner, error) {
 		switch rt.Kind {
 		case RuntimePHPFPM:
@@ -28,18 +36,18 @@ func DefaultRunnerFactory(rt *Runtime) RunnerFactory {
 			return &PooledFastCGIRunner{
 				Network:          netw,
 				Address:          addr,
-				ServerName:       "queue-service",
-				ServerPort:       "80",
-				DialTimeout:      3 * time.Second,
+				ServerName:       cfg.FPMServerName,
+				ServerPort:       cfg.FPMServerPort,
+				DialTimeout:      time.Duration(cfg.FPMDialTimeoutMs) * time.Millisecond,
 				DocumentRoot:     "",
-				MaxResponseBytes: 4 << 20, // 4 MiB
-				TruncateOnLimit:  false,
+				MaxResponseBytes: int64(cfg.MaxResponseBytes),
+				TruncateOnLimit:  truncate,
 			}, nil
 
 		case RuntimePHPCGI:
 			return PHPCGIRunner{
-				MaxStdoutBytes:   4 << 20,
-				MaxStderrBytes:   1 << 20,
+				MaxStdoutBytes:   cfg.MaxStdoutBytes,
+				MaxStderrBytes:   cfg.MaxStderrBytes,
 				KillProcessGroup: true,
 			}, nil
 
@@ -50,8 +58,8 @@ func DefaultRunnerFactory(rt *Runtime) RunnerFactory {
 				return nil, fmt.Errorf("command is required for exec runtime")
 			}
 			return ExecRunner{
-				MaxStdoutBytes:   4 << 20,
-				MaxStderrBytes:   1 << 20,
+				MaxStdoutBytes:   cfg.MaxStdoutBytes,
+				MaxStderrBytes:   cfg.MaxStderrBytes,
 				KillProcessGroup: true,
 			}, nil
 		}

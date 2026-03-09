@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +22,38 @@ import (
 	"go.uber.org/zap"
 )
 
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func envInt64(key string, def int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func envStr(key, def string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v
+}
+
 func main() {
 	logger, err := logging.NewProductionLogger()
 	if err != nil {
@@ -28,10 +61,7 @@ func main() {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	queuesDir := os.Getenv("QUEUES_CONFIG_DIR")
-	if queuesDir == "" {
-		queuesDir = "./configs"
-	}
+	queuesDir := envStr("QUEUES_CONFIG_DIR", "./configs")
 
 	cfgs, err := config.LoadQueueConfigs(queuesDir)
 	if err != nil {
@@ -42,17 +72,20 @@ func main() {
 	}
 
 	// --- storage (bbolt) ---
-	stPath := os.Getenv("QUEUE_STORAGE_PATH")
-	if stPath == "" {
-		stPath = "./data/queue.db"
-	}
+	stPath := envStr("QUEUE_STORAGE_PATH", "./data/queue.db")
 	if err := os.MkdirAll(filepath.Dir(stPath), 0o755); err != nil {
 		logger.Fatal("mkdir storage dir", zap.String("path", stPath), zap.Error(err))
 	}
 
+	storageOpenTimeout := time.Duration(envInt("STORAGE_OPEN_TIMEOUT_MS", 2000)) * time.Millisecond
+	processingTimeoutMs := envInt64("PROCESSING_TIMEOUT_MS", 120_000)
+	gcProcessingGraceMs := envInt64("GC_PROCESSING_GRACE_MS", 120_000)
+
 	st, err := storage.Open(storage.OpenOptions{
-		FilePath: stPath,
-		Timeout:  2 * time.Second,
+		FilePath:            stPath,
+		Timeout:             storageOpenTimeout,
+		ProcessingTimeoutMs: processingTimeoutMs,
+		GCProcessingGraceMs: gcProcessingGraceMs,
 	})
 	if err != nil {
 		logger.Fatal("open storage", zap.String("path", stPath), zap.Error(err))
@@ -96,12 +129,13 @@ func main() {
 		http.Redirect(w, r, "/health", http.StatusPermanentRedirect)
 	})
 
-	fs := http.FileServer(http.Dir("web/static"))
+	staticDir := envStr("STATIC_DIR", "web/static")
+	fs := http.FileServer(http.Dir(staticDir))
 	publicMux.Handle("/static/", http.StripPrefix("/static/", fs))
 
 	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
-			http.ServeFile(w, r, "web/static/index.html")
+			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
 			return
 		}
 
@@ -160,14 +194,13 @@ func main() {
 	publicHandler = httpserver.RequestID(publicHandler)
 	publicHandler = httpserver.AccessLog(logger, publicHandler)
 
-	publicAddr := os.Getenv("PUBLIC_ADDR")
-	if publicAddr == "" {
-		publicAddr = "0.0.0.0:8080"
-	}
+	publicAddr := envStr("PUBLIC_ADDR", "0.0.0.0:8080")
+
+	readHeaderTimeout := time.Duration(envInt("READ_HEADER_TIMEOUT_SEC", 5)) * time.Second
 
 	publicSrv := httpserver.New(httpserver.Config{
 		Addr:              publicAddr,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 		Handler:           publicHandler,
 	})
 
@@ -190,10 +223,7 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	internalAddr := os.Getenv("INTERNAL_ADDR")
-	if internalAddr == "" {
-		internalAddr = "127.0.0.1:8081"
-	}
+	internalAddr := envStr("INTERNAL_ADDR", "127.0.0.1:8081")
 
 	var internalHandler http.Handler = internalMux
 	internalHandler = httpserver.RequestID(internalHandler)
@@ -201,7 +231,7 @@ func main() {
 
 	internalSrv := httpserver.New(httpserver.Config{
 		Addr:              internalAddr,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 		Handler:           internalHandler,
 	})
 
@@ -232,7 +262,8 @@ func main() {
 	}
 
 	// --- graceful shutdown ---
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownTimeout := time.Duration(envInt("SHUTDOWN_TIMEOUT_SEC", 10)) * time.Second
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 
 	if err := publicSrv.Shutdown(shutdownCtx); err != nil {

@@ -4,10 +4,10 @@ name: queue1
 schema_file: queue1.schema.json
 
 # логический максимум сообщений (не критично для теста)
-max_size: 100
+max_size: 1000
 
 # сколько job'ов выполняются параллельно
-workers: 3
+workers: 300
 
 runtime: php-cgi
 script: scripts/job.php
@@ -16,6 +16,6 @@ script: scripts/job.php
 timeout_sec: 30
 
 # буфер очереди (должен быть > workers)
-max_queue: 10
+max_queue: 1000
 max_retries: 3
 retry_delay_ms: 2000

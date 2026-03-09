@@ -51,7 +51,11 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	pushTimeout := time.Duration(rt.Cfg.PushTimeoutSec) * time.Second
+	if pushTimeout <= 0 {
+		pushTimeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), pushTimeout)
 	defer cancel()
 
 	resp, pushErr := m.service.Push(ctx, PushRequest{

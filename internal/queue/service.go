@@ -7,6 +7,7 @@ import (
     "strings"
     "time"
 
+    "go-web-server/internal/config"
     uuidutil "go-web-server/internal/uuid"
     "go-web-server/internal/validate"
 
@@ -58,19 +59,16 @@ func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse,
 		return PushResponse{}, err
 	}
 
-	// 1) runtime exists
 	rt, ok := s.mgr.Get(req.Queue)
 	if !ok || rt == nil {
 		return PushResponse{}, ErrQueueNotFound
 	}
 
-	// 2) idem
 	idemKey, err := normalizeIdemKey(req.IdemKey, req.AutoIdem)
 	if err != nil {
 		return PushResponse{}, err
 	}
 
-	// 3) size check (защита; реальное ограничение лучше делать на read body в handler)
 	limit := int64(maxBodyBytes)
 	if rt.Cfg.MaxSize > 0 && int64(rt.Cfg.MaxSize) < limit {
 		limit = int64(rt.Cfg.MaxSize)
@@ -79,26 +77,24 @@ func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse,
 		return PushResponse{}, ErrPayloadTooLarge{LimitBytes: limit}
 	}
 
-	// 4) json + schema validation
 	if err := rt.Schema.ValidateBytes(req.Body); err != nil {
-		// invalid json
 		if errors.Is(err, validate.ErrInvalidJSON) {
 			return PushResponse{}, ErrInvalidJSON{Cause: err}
 		}
-		// schema error
 		return PushResponse{}, ErrSchemaValidation{Cause: err}
 	}
 
-	// 5) store (dedup barrier)
 	msgID, err := uuidutil.NewV7()
 	if err != nil {
 		return PushResponse{}, fmt.Errorf("msg_id_generation_failed: %w", err)
 	}
-
-	expiresAtMs := time.Now().Add(30 * 24 * time.Hour).UnixMilli()
-
 	effectiveMsgID := msgID
-	created := true
+
+	messageExpiry, _ := config.ParseDurationExt(rt.Cfg.MessageExpiry)
+	if messageExpiry <= 0 {
+		messageExpiry = 30 * 24 * time.Hour
+	}
+	expiresAtMs := time.Now().Add(messageExpiry).UnixMilli()
 
 	if rt.Store != nil {
 		storedMsgID, wasCreated, err := rt.Store.PutNewMessage(
@@ -113,16 +109,17 @@ func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse,
 		if err != nil {
 			return PushResponse{MsgID: msgID, IdemKey: idemKey}, err
 		}
-
-		effectiveMsgID = storedMsgID
-		created = wasCreated
-
-		if !created {
-			return PushResponse{MsgID: effectiveMsgID, IdemKey: idemKey, Created: false}, nil
+		if !wasCreated {
+			return PushResponse{
+				MsgID:   storedMsgID,
+				IdemKey: idemKey,
+				Created: false,
+				Queued:  false,
+			}, nil
 		}
+		effectiveMsgID = storedMsgID
 	}
 
-	// 6) enqueue
 	job := Job{
 		Queue:          req.Queue,
 		MsgID:          effectiveMsgID,
@@ -137,15 +134,31 @@ func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse,
 	}
 
 	if err := rt.Enqueue(ctx, job); err != nil {
-		return PushResponse{MsgID: effectiveMsgID, IdemKey: idemKey, Created: true}, err
+		return PushResponse{
+			MsgID:   effectiveMsgID,
+			IdemKey: idemKey,
+			Created: true,
+			Queued:  false,
+		}, err
 	}
 
-	// MarkQueued после успешного enqueue
 	if rt.Store != nil {
-		_ = rt.Store.MarkQueued(effectiveMsgID)
+		if err := rt.Store.MarkQueued(effectiveMsgID); err != nil {
+			return PushResponse{
+				MsgID:   effectiveMsgID,
+				IdemKey: idemKey,
+				Created: true,
+				Queued:  true,
+			}, err
+		}
 	}
 
-	return PushResponse{MsgID: effectiveMsgID, IdemKey: idemKey, Created: true}, nil
+	return PushResponse{
+		MsgID:   effectiveMsgID,
+		IdemKey: idemKey,
+		Created: true,
+		Queued:  true,
+	}, nil
 }
 
 func normalizeIdemKey(raw string, auto bool) (string, error) {

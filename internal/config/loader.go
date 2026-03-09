@@ -138,6 +138,63 @@ func normalizeConfig(cfg *QueueConfig, fileName, baseDir string) error {
 		cfg.Storage.GCMaxDeletes = 1000
 	}
 
+	// ---- defaults for new configurable fields ----
+
+	// log directory
+	if strings.TrimSpace(cfg.LogDir) == "" {
+		cfg.LogDir = "configs/scripts/logs"
+	}
+
+	// TTLs
+	if strings.TrimSpace(cfg.ResultTTL) == "" {
+		cfg.ResultTTL = "10m"
+	}
+	if strings.TrimSpace(cfg.MessageExpiry) == "" {
+		cfg.MessageExpiry = "30d"
+	}
+
+	// HTTP handler
+	if cfg.PushTimeoutSec == 0 {
+		cfg.PushTimeoutSec = 5
+	}
+	if cfg.EnqueueWaitMs == 0 {
+		cfg.EnqueueWaitMs = 100
+	}
+
+	// runner buffer limits
+	if cfg.MaxStdoutBytes == 0 {
+		cfg.MaxStdoutBytes = 4 << 20 // 4 MiB
+	}
+	if cfg.MaxStderrBytes == 0 {
+		cfg.MaxStderrBytes = 1 << 20 // 1 MiB
+	}
+	if cfg.MaxResponseBytes == 0 {
+		cfg.MaxResponseBytes = 4 << 20 // 4 MiB
+	}
+	// TruncateOnLimit: nil means false (default)
+
+	// FPM extras
+	if cfg.FPMDialTimeoutMs == 0 {
+		cfg.FPMDialTimeoutMs = 3000
+	}
+	if strings.TrimSpace(cfg.FPMServerName) == "" {
+		cfg.FPMServerName = "queue-service"
+	}
+	if strings.TrimSpace(cfg.FPMServerPort) == "" {
+		cfg.FPMServerPort = "80"
+	}
+
+	// maintenance
+	if cfg.RequeueStuckIntervalSec == 0 {
+		cfg.RequeueStuckIntervalSec = 15
+	}
+	if cfg.RequeueStuckBatchLimit == 0 {
+		cfg.RequeueStuckBatchLimit = 200
+	}
+	if cfg.GCBatchLimit == 0 {
+		cfg.GCBatchLimit = 500
+	}
+
 	return nil
 }
 
@@ -178,6 +235,14 @@ func validateConfig(cfg QueueConfig) error {
 	// sanity-checks
 	if cfg.Storage.GCIntervalSec < 0 || cfg.Storage.GCMaxDeletes < 0 {
 		return fmt.Errorf("storage gc settings must be >= 0")
+	}
+
+	// validate new duration fields
+	if _, err := ParseDurationExt(cfg.ResultTTL); err != nil {
+		return fmt.Errorf("result_ttl: %w", err)
+	}
+	if _, err := ParseDurationExt(cfg.MessageExpiry); err != nil {
+		return fmt.Errorf("message_expiry: %w", err)
 	}
 
 	// если не forever — retention должен быть >= max(retMin, accept)

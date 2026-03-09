@@ -35,6 +35,10 @@ type runtimeState struct {
 	// optional: avoid MkdirAll in hot path
 	logDir        string
 	closeJobsOnce sync.Once
+
+	// parsed from config
+	resultTTL    time.Duration
+	enqueueWait  time.Duration
 }
 
 type QueueStore interface {
@@ -177,12 +181,31 @@ kind := RuntimeKind(rtStr)
 	}
 
 	// ---- log dir (optional optimization) ----
-	logDir := filepath.Join("configs/scripts/logs", cfg.Name)
+	logDir := filepath.Join(cfg.LogDir, cfg.Name)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		l.Warn("mkdir_queue_log_dir_failed", zap.String("path", logDir), zap.Error(err))
 	}
 
+	// ---- parse durations from config ----
+	resultTTL, err := config.ParseDurationExt(cfg.ResultTTL)
+	if err != nil {
+		return nil, fmt.Errorf("parse result_ttl: %w", err)
+	}
+	if resultTTL <= 0 {
+		resultTTL = 10 * time.Minute
+	}
+
+	enqueueWait := time.Duration(cfg.EnqueueWaitMs) * time.Millisecond
+	if enqueueWait <= 0 {
+		enqueueWait = 100 * time.Millisecond
+	}
+
 	// ---- make runners: one-runner-per-worker ----
+	truncate := false
+	if cfg.TruncateOnLimit != nil {
+		truncate = *cfg.TruncateOnLimit
+	}
+
 	makeRunner := func() (Runner, error) {
 		// TEST/DI override
 		if ro.runnerFactory != nil {
@@ -204,18 +227,18 @@ kind := RuntimeKind(rtStr)
 			return &PooledFastCGIRunner{
 				Network:          netw,
 				Address:          addr,
-				ServerName:       "queue-service",
-				ServerPort:       "80",
-				DialTimeout:      3 * time.Second,
+				ServerName:       cfg.FPMServerName,
+				ServerPort:       cfg.FPMServerPort,
+				DialTimeout:      time.Duration(cfg.FPMDialTimeoutMs) * time.Millisecond,
 				DocumentRoot:     "",
-				MaxResponseBytes: 4 << 20, // 4 MiB
-				TruncateOnLimit:  false,
+				MaxResponseBytes: int64(cfg.MaxResponseBytes),
+				TruncateOnLimit:  truncate,
 			}, nil
 
 		case RuntimePHPCGI:
 			return PHPCGIRunner{
-				MaxStdoutBytes:   4 << 20,
-				MaxStderrBytes:   1 << 20,
+				MaxStdoutBytes:   cfg.MaxStdoutBytes,
+				MaxStderrBytes:   cfg.MaxStderrBytes,
 				KillProcessGroup: true,
 			}, nil
 
@@ -228,8 +251,8 @@ kind := RuntimeKind(rtStr)
 			}
 
 			return ExecRunner{
-				MaxStdoutBytes:   4 << 20,
-				MaxStderrBytes:   1 << 20,
+				MaxStdoutBytes:   cfg.MaxStdoutBytes,
+				MaxStderrBytes:   cfg.MaxStderrBytes,
 				KillProcessGroup: true,
 			}, nil
 		}
@@ -245,12 +268,14 @@ kind := RuntimeKind(rtStr)
 	}
 
 	rt.st = &runtimeState{
-		jobs:    make(chan Job, maxQueue),
-		quit:    make(chan struct{}),
-		runners: runners,
-		timeout: timeout,
-		log:     l,
-		logDir:  logDir,
+		jobs:        make(chan Job, maxQueue),
+		quit:        make(chan struct{}),
+		runners:     runners,
+		timeout:     timeout,
+		log:         l,
+		logDir:      logDir,
+		resultTTL:   resultTTL,
+		enqueueWait: enqueueWait,
 	}
 
 	// ---- start workers ----
@@ -306,7 +331,11 @@ func (rt *Runtime) Enqueue(ctx context.Context, job Job) error {
 		)
 	}
 
-	timer := time.NewTimer(100 * time.Millisecond)
+	wait := rt.st.enqueueWait
+	if wait <= 0 {
+		wait = 100 * time.Millisecond
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 
 	select {
@@ -431,7 +460,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 					// optional: don't leave task stuck in processing
 					if rt.Store != nil {
 						now := time.Now().UnixMilli()
-						ttlMs := time.Now().Add(10 * time.Minute).UnixMilli()
+						ttlMs := time.Now().Add(rt.st.resultTTL).UnixMilli()
 
 						_ = rt.Store.MarkDone(
 							job.MsgID,
@@ -506,7 +535,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 
 			if rt.Store != nil {
 				now := time.Now()
-				ttlMs := now.Add(10 * time.Minute).UnixMilli()
+				ttlMs := now.Add(rt.st.resultTTL).UnixMilli()
 
 				err := rt.Store.MarkDone(
 					job.MsgID,
@@ -559,10 +588,28 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 func (rt *Runtime) maintenanceLoop() {
 	defer rt.st.wg.Done()
 
-	requeueTicker := time.NewTicker(15 * time.Second) // RequeueStuck
-	gcTicker := time.NewTicker(1 * time.Minute)       // GC
+	requeueInterval := time.Duration(rt.Cfg.RequeueStuckIntervalSec) * time.Second
+	if requeueInterval <= 0 {
+		requeueInterval = 15 * time.Second
+	}
+	gcInterval := time.Duration(rt.Cfg.Storage.GCIntervalSec) * time.Second
+	if gcInterval <= 0 {
+		gcInterval = 1 * time.Minute
+	}
+
+	requeueTicker := time.NewTicker(requeueInterval)
+	gcTicker := time.NewTicker(gcInterval)
 	defer requeueTicker.Stop()
 	defer gcTicker.Stop()
+
+	requeueBatch := rt.Cfg.RequeueStuckBatchLimit
+	if requeueBatch <= 0 {
+		requeueBatch = 200
+	}
+	gcBatch := rt.Cfg.GCBatchLimit
+	if gcBatch <= 0 {
+		gcBatch = 500
+	}
 
 	for {
 		select {
@@ -571,7 +618,7 @@ func (rt *Runtime) maintenanceLoop() {
 
 		case <-requeueTicker.C:
 			if rt.Store != nil {
-				n, err := rt.Store.RequeueStuck(0, 200)
+				n, err := rt.Store.RequeueStuck(0, requeueBatch)
 				if err != nil {
 					rt.st.log.Warn("requeue_stuck_failed", zap.Error(err))
 				} else if n > 0 {
@@ -581,7 +628,7 @@ func (rt *Runtime) maintenanceLoop() {
 
 		case <-gcTicker.C:
 			if rt.Store != nil {
-				n, err := rt.Store.GC(0, 500)
+				n, err := rt.Store.GC(0, gcBatch)
 				if err != nil {
 					rt.st.log.Warn("gc_failed", zap.Error(err))
 				} else if n > 0 {
@@ -611,7 +658,7 @@ func (rt *Runtime) appendStdStreams(job Job, out, errb []byte) {
 
 	dir := rt.st.logDir
 	if dir == "" {
-		dir = filepath.Join("configs/scripts/logs", job.Queue)
+		dir = filepath.Join(rt.Cfg.LogDir, job.Queue)
 	}
 
 	logPath := filepath.Join(dir, job.MsgID+".log")

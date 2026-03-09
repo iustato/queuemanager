@@ -3,15 +3,15 @@ name: queue2
 schema_file: queue1.schema.json
 
 max_size: 100
-workers: 3
+workers: 40
 
 runtime: php-fpm
-script: scripts/job.php
+script: /mnt/c/Users/Den/Desktop/queue-service/configs/scripts/job.php
 
 fpm_network: unix
 fpm_address: /run/php/php8.3-fpm.sock
 
 timeout_sec: 30
-max_queue: 10
-max_retries: 3
+max_queue: 200
+max_retries: 0
 retry_delay_ms: 2000
