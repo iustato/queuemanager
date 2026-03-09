@@ -1,0 +1,122 @@
+## Что нужно знать для деплоя в Kubernetes
+
+### 1. Ограничение на 1 реплику
+
+BoltDB — встроенная файловая БД с эксклюзивной блокировкой. Только один процесс может писать в файл. Поэтому:
+- **Нельзя запускать несколько реплик**, пишущих в один volume
+- Используй `Deployment` с `replicas: 1` + PVC, либо `StatefulSet`
+
+### 2. Переменные окружения
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `PUBLIC_ADDR` | `0.0.0.0:8080` | Адрес публичного API |
+| `INTERNAL_ADDR` | `127.0.0.1:8081` | Адрес внутреннего API (колбэки воркеров) |
+| `QUEUES_CONFIG_DIR` | `./configs` | Путь к YAML-конфигам очередей |
+| `QUEUE_STORAGE_PATH` | `./data/queue.db` | Путь к файлу BoltDB |
+| `STORAGE_OPEN_TIMEOUT_MS` | `2000` | Таймаут открытия БД |
+| `PROCESSING_TIMEOUT_MS` | `120000` | Таймаут обработки |
+| `GC_PROCESSING_GRACE_MS` | `120000` | Grace period для GC |
+| `STATIC_DIR` | `web/static` | Статические файлы |
+| `SHUTDOWN_TIMEOUT_SEC` | `10` | Таймаут graceful shutdown |
+| `READ_HEADER_TIMEOUT_SEC` | `5` | Read header timeout |
+| `WORKER_TOKEN` | (пусто) | Токен авторизации воркеров |
+| `ALLOW_AUTO_IDEMPOTENCY` | (пусто) | Авто-генерация idempotency key |
+| `DISABLE_ACCESS_LOG` | (пусто) | `"1"` — отключить access log |
+
+### 3. Порты
+
+- **8080** — публичный API (push, status, result, info, health)
+- **8081** — внутренний API (`/internal/{queue}/done/{msg_id}`). По умолчанию слушает на `127.0.0.1` — если нужен доступ из другого контейнера в поде, ставь `INTERNAL_ADDR=0.0.0.0:8081`
+
+### 4. Volumes и точки монтирования
+
+| Путь | Тип | Назначение |
+|---|---|---|
+| `/app/data/` (для `queue.db`) | **PVC (RWO)** | БД BoltDB — обязательно персистентный |
+| `/app/configs/` | ConfigMap или Volume | YAML-конфиги очередей + JSON-схемы + скрипты |
+| `/app/configs/scripts/logs/` | emptyDir или PV | Лог-файлы выполнения джобов (растут со временем) |
+| `/app/web/static/` | Встроить в образ | Статика (одна страница index.html) |
+
+### 5. Зависимости от PHP-рантаймов
+
+- Очереди с `runtime: php-cgi` — в образе должен быть установлен `php-cgi`
+- Очереди с `runtime: php-fpm` — нужен sidecar-контейнер с PHP-FPM. Unix-сокет шарится через `emptyDir` volume между контейнерами
+- Очереди с `runtime: exec` — нужна соответствующая команда в контейнере
+
+### 6. Health-проба
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 3
+  periodSeconds: 5
+```
+
+Эндпоинт `/health` возвращает `{"status":"ok"}` если HTTP-сервер жив. Отдельного readiness-эндпоинта, проверяющего BoltDB, нет.
+
+### 7. Graceful shutdown
+
+Сервер ловит `SIGTERM` (Kubernetes шлёт его при остановке пода). Выставь `terminationGracePeriodSeconds` не меньше `SHUTDOWN_TIMEOUT_SEC` + максимальный `timeout_sec` по очередям (сейчас 30 сек):
+
+```yaml
+terminationGracePeriodSeconds: 45
+```
+
+### 8. Сборка образа (Dockerfile нет, нужно создать)
+
+Примерный Dockerfile:
+
+```dockerfile
+FROM golang:1.23-alpine AS builder
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o server ./cmd/server
+
+FROM php:8.3-cli-alpine
+RUN apk add --no-cache php-cgi
+COPY --from=builder /build/server /app/server
+COPY web/static /app/web/static
+WORKDIR /app
+ENTRYPOINT ["/app/server"]
+```
+
+Конфиги и скрипты лучше монтировать через ConfigMap/Volume, а не запекать в образ.
+
+### 9. Ключевые ограничения
+
+- **Горизонтальное масштабирование невозможно** из-за BoltDB. Если нужно масштабирование — придётся заменить storage на внешнюю БД (PostgreSQL, Redis и т.д.)
+- Лог-файлы джобов пишутся на диск и накапливаются — нужна ротация или пересылка в centralized logging
+- `INTERNAL_ADDR` по умолчанию на loopback — для sidecar-контейнеров нужно явно менять на `0.0.0.0`
+
+### 10. HTTP API
+
+**Публичный сервер (порт 8080):**
+
+| Метод | Путь | Описание |
+|---|---|---|
+| GET | `/health` | `{"status":"ok"}` |
+| GET | `/` | index.html |
+| GET | `/static/*` | Статические файлы |
+| GET | `/info` | Инфо по всем очередям |
+| POST | `/{queue}/newmessage` | Отправить сообщение в очередь |
+| GET | `/{queue}/info` | Инфо по одной очереди |
+| GET | `/{queue}/status/{msg_id}` | Статус сообщения |
+| GET | `/{queue}/result/{msg_id}` | Результат обработки |
+
+**Внутренний сервер (порт 8081):**
+
+| Метод | Путь | Описание |
+|---|---|---|
+| POST | `/internal/{queue}/done/{msg_id}` | Воркер сообщает о завершении |
