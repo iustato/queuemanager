@@ -1,2 +1,0 @@
-git push origin main
-git push bpay main

@@ -1,6 +1,0 @@
-//Если boltbrowser пишет “locked”
-cp ./data/queue.db /tmp/queue.db
-boltbrowser -ro /tmp/queue.db
-
-//для запуска
-~/go/bin/boltbrowser -ro /tmp/queue.db
