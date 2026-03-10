@@ -258,3 +258,116 @@ func validateConfig(cfg QueueConfig) error {
 
 	return nil
 }
+
+// ValidateConfig is the public wrapper for validateConfig.
+func ValidateConfig(cfg QueueConfig) error {
+	return validateConfig(cfg)
+}
+
+// ValidateConfigForAPI validates config from admin API requests.
+// Unlike ValidateConfig, it does not require SchemaFile (schema is provided inline).
+func ValidateConfigForAPI(cfg QueueConfig) error {
+	if cfg.Name == "" {
+		return fmt.Errorf("queue name is empty")
+	}
+	if cfg.Workers <= 0 {
+		return fmt.Errorf("workers must be > 0")
+	}
+
+	accept, err := ParseDurationExt(cfg.Idempotency.AcceptMaxAge)
+	if err != nil {
+		return fmt.Errorf("idempotency.accept_max_age: %w", err)
+	}
+	retMin, err := ParseDurationExt(cfg.Idempotency.RetentionMin)
+	if err != nil {
+		return fmt.Errorf("idempotency.retention_min: %w", err)
+	}
+	var ret time.Duration
+	if !cfg.Storage.Forever {
+		ret, err = ParseDurationExt(cfg.Storage.Retention)
+		if err != nil {
+			return fmt.Errorf("storage.retention: %w", err)
+		}
+	}
+	if cfg.Storage.GCIntervalSec < 0 || cfg.Storage.GCMaxDeletes < 0 {
+		return fmt.Errorf("storage gc settings must be >= 0")
+	}
+	if _, err := ParseDurationExt(cfg.ResultTTL); err != nil {
+		return fmt.Errorf("result_ttl: %w", err)
+	}
+	if _, err := ParseDurationExt(cfg.MessageExpiry); err != nil {
+		return fmt.Errorf("message_expiry: %w", err)
+	}
+	if !cfg.Storage.Forever {
+		minNeed := retMin
+		if accept > minNeed {
+			minNeed = accept
+		}
+		if ret != 0 && ret < minNeed {
+			return fmt.Errorf("storage.retention must be >= idempotency window (need at least %s)", minNeed)
+		}
+	}
+	return nil
+}
+
+// NormalizeConfigForAPI sets defaults for a config received via admin API.
+// Unlike normalizeConfig it does NOT resolve file paths (schema/script come inline).
+func NormalizeConfigForAPI(cfg *QueueConfig) {
+	if cfg.Idempotency.AcceptMaxAge == "" {
+		cfg.Idempotency.AcceptMaxAge = "30d"
+	}
+	if cfg.Idempotency.RetentionMin == "" {
+		cfg.Idempotency.RetentionMin = cfg.Idempotency.AcceptMaxAge
+	}
+	if !cfg.Storage.Forever && cfg.Storage.Retention == "" {
+		cfg.Storage.Retention = cfg.Idempotency.RetentionMin
+	}
+	if cfg.Storage.GCIntervalSec == 0 {
+		cfg.Storage.GCIntervalSec = 60
+	}
+	if cfg.Storage.GCMaxDeletes == 0 {
+		cfg.Storage.GCMaxDeletes = 1000
+	}
+	if cfg.LogDir == "" {
+		cfg.LogDir = "configs/scripts/logs"
+	}
+	if cfg.ResultTTL == "" {
+		cfg.ResultTTL = "10m"
+	}
+	if cfg.MessageExpiry == "" {
+		cfg.MessageExpiry = "30d"
+	}
+	if cfg.PushTimeoutSec == 0 {
+		cfg.PushTimeoutSec = 5
+	}
+	if cfg.EnqueueWaitMs == 0 {
+		cfg.EnqueueWaitMs = 100
+	}
+	if cfg.MaxStdoutBytes == 0 {
+		cfg.MaxStdoutBytes = 4 << 20
+	}
+	if cfg.MaxStderrBytes == 0 {
+		cfg.MaxStderrBytes = 1 << 20
+	}
+	if cfg.MaxResponseBytes == 0 {
+		cfg.MaxResponseBytes = 4 << 20
+	}
+	if cfg.FPMDialTimeoutMs == 0 {
+		cfg.FPMDialTimeoutMs = 3000
+	}
+	if cfg.FPMServerName == "" {
+		cfg.FPMServerName = "queue-service"
+	}
+	if cfg.FPMServerPort == "" {
+		cfg.FPMServerPort = "80"
+	}
+	if cfg.RequeueStuckIntervalSec == 0 {
+		cfg.RequeueStuckIntervalSec = 15
+	}
+	if cfg.RequeueStuckBatchLimit == 0 {
+		cfg.RequeueStuckBatchLimit = 200
+	}
+	if cfg.GCBatchLimit == 0 {
+		cfg.GCBatchLimit = 500
+	}
+}

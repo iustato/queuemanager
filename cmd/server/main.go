@@ -128,6 +128,34 @@ func main() {
 	fs := http.FileServer(http.Dir(staticDir))
 	publicMux.Handle("/static/", http.StripPrefix("/static/", fs))
 
+	// --- admin API (CRUD queues) ---
+	publicMux.HandleFunc("/api/queues", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			qm.HandleListQueues(w, r)
+		case http.MethodPost:
+			qm.HandleAddQueue(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	publicMux.HandleFunc("/api/queues/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/api/queues/")
+		name = strings.TrimRight(name, "/")
+		if name == "" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			qm.HandleUpdateQueue(name, w, r)
+		case http.MethodDelete:
+			qm.HandleDeleteQueue(name, w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
 			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))

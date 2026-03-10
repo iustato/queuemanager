@@ -46,6 +46,24 @@ func LoadSchemaFromFile(path string) (*CompiledSchema, error) {
 	return &CompiledSchema{schema: s}, nil
 }
 
+// CompileSchemaFromBytes compiles a JSON Schema from raw bytes (for admin API).
+func CompileSchemaFromBytes(data []byte) (*CompiledSchema, error) {
+	compiler := jsonschema.NewCompiler()
+	compiler.Draft = jsonschema.Draft2020
+
+	const schemaURL = "mem://inline-schema.json"
+	if err := compiler.AddResource(schemaURL, strings.NewReader(string(data))); err != nil {
+		return nil, fmt.Errorf("add inline schema resource: %w", err)
+	}
+
+	s, err := compiler.Compile(schemaURL)
+	if err != nil {
+		return nil, fmt.Errorf("compile inline schema: %w", err)
+	}
+
+	return &CompiledSchema{schema: s}, nil
+}
+
 func (cs *CompiledSchema) ValidateJSON(payload any) error {
 	if cs == nil || cs.schema == nil {
 		return fmt.Errorf("schema is not initialized")
