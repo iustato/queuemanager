@@ -17,15 +17,6 @@ import (
 )
 
 func (m *Manager) HandleGetInfoAll(w http.ResponseWriter, r *http.Request) {
-	if m.store == nil {
-		writeAPIError(w, r, http.StatusInternalServerError,
-			"storage_not_initialized",
-			"storage is not initialized",
-			nil,
-		)
-		return
-	}
-
 	fromMs, err := parseFromTimeMs(r)
 	if err != nil {
 		writeAPIError(w, r, http.StatusBadRequest,
@@ -36,15 +27,17 @@ func (m *Manager) HandleGetInfoAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	all, err := m.store.GetInfoAll(fromMs) // map[string]storage.QueueInfo
-	if err != nil {
-		writeAPIError(w, r, http.StatusInternalServerError,
-			"internal",
-			err.Error(),
-			nil,
-		)
-		return
+	// aggregate info from each per-queue store
+	m.mu.RLock()
+	names := make([]string, 0, len(m.queues))
+	rts := make([]*Runtime, 0, len(m.queues))
+	for name, rt := range m.queues {
+		if rt != nil && rt.Store != nil {
+			names = append(names, name)
+			rts = append(rts, rt)
+		}
 	}
+	m.mu.RUnlock()
 
 	type queueRow struct {
 		Queue         string  `json:"queue"`
@@ -54,10 +47,14 @@ func (m *Manager) HandleGetInfoAll(w http.ResponseWriter, r *http.Request) {
 		AvgDurationMs float64 `json:"avg_duration_ms"`
 	}
 
-	queues := make([]queueRow, 0, len(all))
-	for q, info := range all {
+	queues := make([]queueRow, 0, len(names))
+	for i, rt := range rts {
+		info, err := rt.Store.GetInfo(names[i], fromMs)
+		if err != nil {
+			continue
+		}
 		queues = append(queues, queueRow{
-			Queue:         q,
+			Queue:         names[i],
 			Succeeded:     info.Succeeded,
 			Failed:        info.Failed,
 			Retries:       info.Retries,
@@ -74,15 +71,6 @@ func (m *Manager) HandleGetInfoAll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) HandleGetInfo(queueName string, w http.ResponseWriter, r *http.Request) {
-	if m.store == nil {
-		writeAPIError(w, r, http.StatusInternalServerError,
-			"storage_not_initialized",
-			"storage is not initialized",
-			nil,
-		)
-		return
-	}
-
 	queueName = strings.TrimSpace(queueName)
 	if queueName == "" {
 		writeAPIError(w, r, http.StatusBadRequest,
@@ -92,10 +80,19 @@ func (m *Manager) HandleGetInfo(queueName string, w http.ResponseWriter, r *http
 		)
 		return
 	}
-	if _, ok := m.Get(queueName); !ok {
+	rt, ok := m.Get(queueName)
+	if !ok || rt == nil {
 		writeAPIError(w, r, http.StatusNotFound,
 			"queue_not_found",
 			"unknown queue",
+			map[string]any{"queue": queueName},
+		)
+		return
+	}
+	if rt.Store == nil {
+		writeAPIError(w, r, http.StatusInternalServerError,
+			"storage_not_initialized",
+			"storage is not initialized",
 			map[string]any{"queue": queueName},
 		)
 		return
@@ -111,7 +108,7 @@ func (m *Manager) HandleGetInfo(queueName string, w http.ResponseWriter, r *http
 		return
 	}
 
-	info, err := m.store.GetInfo(queueName, fromMs)
+	info, err := rt.Store.GetInfo(queueName, fromMs)
 	if err != nil {
 		writeAPIError(w, r, http.StatusInternalServerError,
 			"internal",
@@ -132,17 +129,7 @@ func (m *Manager) HandleGetInfo(queueName string, w http.ResponseWriter, r *http
 }
 
 // GET /{queue}/status/{msg_id}
-// GET /{queue}/status/{msg_id}
 func (m *Manager) HandleGetStatus(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
-	if m.store == nil {
-		writeAPIError(w, r, http.StatusInternalServerError,
-			"storage_not_initialized",
-			"storage is not initialized",
-			nil,
-		)
-		return
-	}
-
 	queueName = strings.TrimSpace(queueName)
 	msgID = strings.TrimSpace(msgID)
 	if queueName == "" || msgID == "" {
@@ -153,7 +140,8 @@ func (m *Manager) HandleGetStatus(queueName, msgID string, w http.ResponseWriter
 		)
 		return
 	}
-	if _, ok := m.Get(queueName); !ok {
+	rt, ok := m.Get(queueName)
+	if !ok || rt == nil {
 		writeAPIError(w, r, http.StatusNotFound,
 			"queue_not_found",
 			"unknown queue",
@@ -161,8 +149,16 @@ func (m *Manager) HandleGetStatus(queueName, msgID string, w http.ResponseWriter
 		)
 		return
 	}
+	if rt.Store == nil {
+		writeAPIError(w, r, http.StatusInternalServerError,
+			"storage_not_initialized",
+			"storage is not initialized",
+			nil,
+		)
+		return
+	}
 
-	st, _, err := m.store.GetStatusAndResult(msgID)
+	st, _, err := rt.Store.GetStatusAndResult(msgID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotReady) {
 			writeAPIError(w, r, http.StatusConflict,
@@ -188,17 +184,7 @@ func (m *Manager) HandleGetStatus(queueName, msgID string, w http.ResponseWriter
 }
 
 // GET /{queue}/result/{msg_id}
-// GET /{queue}/result/{msg_id}
 func (m *Manager) HandleGetResult(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
-	if m.store == nil {
-		writeAPIError(w, r, http.StatusInternalServerError,
-			"storage_not_initialized",
-			"storage is not initialized",
-			nil,
-		)
-		return
-	}
-
 	queueName = strings.TrimSpace(queueName)
 	msgID = strings.TrimSpace(msgID)
 	if queueName == "" || msgID == "" {
@@ -209,7 +195,8 @@ func (m *Manager) HandleGetResult(queueName, msgID string, w http.ResponseWriter
 		)
 		return
 	}
-	if _, ok := m.Get(queueName); !ok {
+	rt, ok := m.Get(queueName)
+	if !ok || rt == nil {
 		writeAPIError(w, r, http.StatusNotFound,
 			"queue_not_found",
 			"unknown queue",
@@ -217,8 +204,16 @@ func (m *Manager) HandleGetResult(queueName, msgID string, w http.ResponseWriter
 		)
 		return
 	}
+	if rt.Store == nil {
+		writeAPIError(w, r, http.StatusInternalServerError,
+			"storage_not_initialized",
+			"storage is not initialized",
+			nil,
+		)
+		return
+	}
 
-	st, res, err := m.store.GetStatusAndResult(msgID)
+	st, res, err := rt.Store.GetStatusAndResult(msgID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotReady) {
 			writeAPIError(w, r, http.StatusConflict,
@@ -245,15 +240,6 @@ func (m *Manager) HandleGetResult(queueName, msgID string, w http.ResponseWriter
 }
 
 func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
-	if m.store == nil {
-		writeAPIError(w, r, http.StatusInternalServerError,
-			"storage_not_initialized",
-			"storage is not initialized",
-			nil,
-		)
-		return
-	}
-
 	queueName = strings.TrimSpace(queueName)
 	msgID = strings.TrimSpace(msgID)
 	if queueName == "" || msgID == "" {
@@ -264,11 +250,20 @@ func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWrite
 		)
 		return
 	}
-	if _, ok := m.Get(queueName); !ok {
+	rt, ok := m.Get(queueName)
+	if !ok || rt == nil {
 		writeAPIError(w, r, http.StatusNotFound,
 			"queue_not_found",
 			"unknown queue",
 			map[string]any{"queue": queueName},
+		)
+		return
+	}
+	if rt.Store == nil {
+		writeAPIError(w, r, http.StatusInternalServerError,
+			"storage_not_initialized",
+			"storage is not initialized",
+			nil,
 		)
 		return
 	}
@@ -325,15 +320,13 @@ func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWrite
 	ttl := p.TTLms
 	if ttl == 0 {
 		defaultTTL := 10 * time.Minute
-		if rt, ok := m.Get(queueName); ok && rt != nil {
-			if parsed, err := config.ParseDurationExt(rt.Cfg.ResultTTL); err == nil && parsed > 0 {
-				defaultTTL = parsed
-			}
+		if parsed, err := config.ParseDurationExt(rt.Cfg.ResultTTL); err == nil && parsed > 0 {
+			defaultTTL = parsed
 		}
 		ttl = time.Now().Add(defaultTTL).UnixMilli()
 	}
 
-	if err := m.store.MarkDone(msgID, status, storage.Result{
+	if err := rt.Store.MarkDone(msgID, status, storage.Result{
 		FinishedAt: finishedAt,
 		ExitCode:   p.ExitCode,
 		DurationMs: p.DurationMs,

@@ -2,10 +2,13 @@ package queue
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 
 	"go-web-server/internal/config"
+	"go-web-server/internal/storage"
 	"go-web-server/internal/validate"
 
 	"go.uber.org/zap"
@@ -22,7 +25,7 @@ func testRuntimeCmd() string {
 }
 
 func TestManager_NewManager_NonNilFields(t *testing.T) {
-	m := NewManager(nil)
+	m := NewManager(nil, t.TempDir(), storage.OpenOptions{})
 	if m == nil {
 		t.Fatalf("expected non-nil manager")
 	}
@@ -35,7 +38,7 @@ func TestManager_NewManager_NonNilFields(t *testing.T) {
 }
 
 func TestManager_AddQueue_Duplicate(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	cfg := config.QueueConfig{
 		Name:    "q1",
@@ -54,7 +57,7 @@ func TestManager_AddQueue_Duplicate(t *testing.T) {
 }
 
 func TestManager_ListNames_Get_DeleteQueue(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	cfg := config.QueueConfig{
 		Name:    "q1",
@@ -84,8 +87,34 @@ func TestManager_ListNames_Get_DeleteQueue(t *testing.T) {
 	}
 }
 
+func TestManager_DeleteQueue_RemovesDBFile(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+
+	cfg := config.QueueConfig{
+		Name:    "q1",
+		Workers: 0,
+		Runtime: testRuntimeCmd(),
+		Script:  "dummy.php",
+	}
+	if err := m.AddQueue(cfg, nil); err != nil {
+		t.Fatalf("AddQueue: %v", err)
+	}
+
+	dbPath := filepath.Join(dir, "q1.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		t.Fatalf("expected %s to exist after AddQueue", dbPath)
+	}
+
+	m.DeleteQueue("q1")
+
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be removed after DeleteQueue, err=%v", dbPath, err)
+	}
+}
+
 func TestManager_ReplaceQueue_Replaces(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	cfg1 := config.QueueConfig{
 		Name:    "q1",
@@ -118,7 +147,7 @@ func TestManager_ReplaceQueue_Replaces(t *testing.T) {
 }
 
 func TestManager_SetCommand_Deprecated(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	err := m.SetCommand("q1", []string{"x"})
 	if err == nil {
@@ -127,7 +156,7 @@ func TestManager_SetCommand_Deprecated(t *testing.T) {
 }
 
 func TestManager_Enqueue_UnknownQueue(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	err := m.Enqueue(context.Background(), "missing", "m1", []byte("x"))
 	if err == nil {
@@ -139,7 +168,7 @@ func TestManager_Enqueue_UnknownQueue(t *testing.T) {
 }
 
 func TestManager_StopAll_NoPanic(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	// добавим пару очередей
 	for _, q := range []string{"q1", "q2"} {

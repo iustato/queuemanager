@@ -7,12 +7,13 @@ import (
 	"testing"
 
 	"go-web-server/internal/config"
+	"go-web-server/internal/storage"
 
 	"go.uber.org/zap"
 )
 
 func TestHandleNewMessage_Rejected_BodyTooLarge(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	// Чтобы limit был маленький: создаём runtime с MaxSize=2
 	m.queues["q1"] = &Runtime{
@@ -36,7 +37,7 @@ func TestHandleNewMessage_Rejected_BodyTooLarge(t *testing.T) {
 }
 
 func TestHandleNewMessage_Rejected_ByPushError(t *testing.T) {
-	m := NewManager(zap.NewNop())
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
 
 	// GET почти наверняка будет отвергнут Push-валидацией (а readLimitedBody пройдёт)
 	req := httptest.NewRequest(http.MethodGet, "http://x?x=1", strings.NewReader("ok"))

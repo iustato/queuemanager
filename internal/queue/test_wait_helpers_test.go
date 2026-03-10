@@ -21,3 +21,15 @@ func waitTerminalStatus(t *testing.T, store QueueStore, msgID string, timeout ti
 	t.Fatalf("timeout waiting terminal status for msg_id=%s", msgID)
 	return "", storage.Result{}
 }
+
+func mustGetStore(t *testing.T, mgr *Manager, queueName string) QueueStore {
+	t.Helper()
+	rt, ok := mgr.Get(queueName)
+	if !ok || rt == nil {
+		t.Fatalf("queue %q not found in manager", queueName)
+	}
+	if rt.Store == nil {
+		t.Fatalf("queue %q has nil Store", queueName)
+	}
+	return rt.Store
+}

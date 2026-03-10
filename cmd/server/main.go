@@ -71,29 +71,24 @@ func main() {
 		)
 	}
 
-	// --- storage (bbolt) ---
-	stPath := envStr("QUEUE_STORAGE_PATH", "./data/queue.db")
-	if err := os.MkdirAll(filepath.Dir(stPath), 0o755); err != nil {
-		logger.Fatal("mkdir storage dir", zap.String("path", stPath), zap.Error(err))
+	// --- storage (bbolt) — per-queue files ---
+	storageDir := envStr("QUEUE_STORAGE_DIR", "./data")
+	if err := os.MkdirAll(storageDir, 0o755); err != nil {
+		logger.Fatal("mkdir storage dir", zap.String("path", storageDir), zap.Error(err))
 	}
 
 	storageOpenTimeout := time.Duration(envInt("STORAGE_OPEN_TIMEOUT_MS", 2000)) * time.Millisecond
 	processingTimeoutMs := envInt64("PROCESSING_TIMEOUT_MS", 120_000)
 	gcProcessingGraceMs := envInt64("GC_PROCESSING_GRACE_MS", 120_000)
 
-	st, err := storage.Open(storage.OpenOptions{
-		FilePath:            stPath,
+	storageOpts := storage.OpenOptions{
 		Timeout:             storageOpenTimeout,
 		ProcessingTimeoutMs: processingTimeoutMs,
 		GCProcessingGraceMs: gcProcessingGraceMs,
-	})
-	if err != nil {
-		logger.Fatal("open storage", zap.String("path", stPath), zap.Error(err))
 	}
-	defer func() { _ = st.Close() }()
 
 	// --- queues ---
-	qm := queue.NewManagerWithStore(logger, st)
+	qm := queue.NewManager(logger, storageDir, storageOpts)
 
 	for _, qc := range cfgs {
 		sch, err := validate.LoadSchemaFromFile(qc.SchemaFile)

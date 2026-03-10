@@ -247,17 +247,12 @@ func newE2EServer(t *testing.T, _ e2eServerOpts) (ts *httptest.Server, qm *Manag
 	_ = os.Setenv("ALLOW_AUTO_IDEMPOTENCY", "true") // чтобы можно было без Idempotency-Key
 	logger := zap.NewNop()
 
-	// temp bolt file
-	dbPath := filepath.Join(t.TempDir(), "e2e_queue.db")
-	st, err := storage.Open(storage.OpenOptions{
-		FilePath: dbPath,
-		Timeout:  2 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
+	// temp directory for per-queue bolt files
+	storageDir := filepath.Join(t.TempDir(), "storage")
 
-	qm = NewManagerWithStore(logger, st)
+	qm = NewManager(logger, storageDir, storage.OpenOptions{
+		Timeout: 2 * time.Second,
+	})
 
 	// temp schema file
 	schemaPath := filepath.Join(t.TempDir(), "schema.json")
@@ -323,7 +318,6 @@ func newE2EServer(t *testing.T, _ e2eServerOpts) (ts *httptest.Server, qm *Manag
 	cleanup = func() {
 		ts.Close()
 		qm.StopAll()
-		_ = st.Close()
 	}
 
 	return ts, qm, cleanup
@@ -384,7 +378,7 @@ func TestE2E_HTTP_HappyPath(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManagerWithStore(zap.NewNop(), st)
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -461,7 +455,7 @@ func TestE2E_HTTP_Dedup_IdempotencyKey(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManagerWithStore(zap.NewNop(), st)
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -545,7 +539,7 @@ func TestE2E_HTTP_QueueBusy_WhenOverCapacity(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManagerWithStore(zap.NewNop(), st)
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -643,7 +637,7 @@ func TestE2E_HTTP_RetryFlow_FailThenSuccess(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManagerWithStore(zap.NewNop(), st)
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -746,7 +740,7 @@ func TestE2E_HTTP_RetryLimitExceeded_FinalFailed(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManagerWithStore(zap.NewNop(), st)
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -831,7 +825,7 @@ func TestE2E_HTTP_GetStatusAndResult_AfterJobDone(t *testing.T) {
 		t.Fatalf("expected msgID+idemKey, got msgID=%q idem=%q", msgID, idem)
 	}
 
-	st, res := waitTerminalStatus(t, qm.store, msgID, 2*time.Second)
+	st, res := waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID, 2*time.Second)
 
 	// GET status
 	{
@@ -910,8 +904,8 @@ func TestE2E_HTTP_InfoEndpoints_ReturnStats(t *testing.T) {
 	}
 
 	// дождаться выполнения обоих
-	_, _ = waitTerminalStatus(t, qm.store, msgID1, 2*time.Second)
-	_, _ = waitTerminalStatus(t, qm.store, msgID2, 2*time.Second)
+	_, _ = waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID1, 2*time.Second)
+	_, _ = waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID2, 2*time.Second)
 
 	var fromAll int64
 
@@ -1064,8 +1058,8 @@ func TestE2E_HTTP_InfoEndpoints_FromTimeQuery_IsReflected(t *testing.T) {
 	// создаём пару задач, чтобы было что агрегировать
 	msgID1, _ := postNewMessage(t, ts.URL, queue, `{"text":"from-time-1"}`, "")
 	msgID2, _ := postNewMessage(t, ts.URL, queue, `{"text":"from-time-2"}`, "")
-	_, _ = waitTerminalStatus(t, qm.store, msgID1, 2*time.Second)
-	_, _ = waitTerminalStatus(t, qm.store, msgID2, 2*time.Second)
+	_, _ = waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID1, 2*time.Second)
+	_, _ = waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID2, 2*time.Second)
 
 	// задаём from_time_ms (например: 1 сек назад)
 	from := time.Now().Add(-1 * time.Second).UnixMilli()

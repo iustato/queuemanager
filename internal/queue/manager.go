@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"go-web-server/internal/config"
@@ -20,26 +21,25 @@ type Manager struct {
 	mu     sync.RWMutex
 	queues map[string]*Runtime
 	log    *zap.Logger
-	store  *storage.Store
+
+	storageDir  string
+	storageOpts storage.OpenOptions
 
 	workerToken   string
 	allowAutoIdem bool
 	service       *QueueService
 }
 
-func NewManager(logger *zap.Logger) *Manager {
-	return NewManagerWithStore(logger, nil)
-}
-
-func NewManagerWithStore(logger *zap.Logger, st *storage.Store) *Manager {
+func NewManager(logger *zap.Logger, storageDir string, opts storage.OpenOptions) *Manager {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 
 	m := &Manager{
-		queues: make(map[string]*Runtime),
-		log:    logger.Named("queue"),
-		store:  st,
+		queues:      make(map[string]*Runtime),
+		log:         logger.Named("queue"),
+		storageDir:  storageDir,
+		storageOpts: opts,
 	}
 
 	// читаем env один раз
@@ -50,6 +50,18 @@ func NewManagerWithStore(logger *zap.Logger, st *storage.Store) *Manager {
 	m.service = NewQueueService(m)
 
 	return m
+}
+
+// openStoreForQueue opens a per-queue BoltDB file in storageDir.
+func (m *Manager) openStoreForQueue(queueName string) (*storage.Store, error) {
+	opts := m.storageOpts
+	opts.FilePath = filepath.Join(m.storageDir, queueName+".db")
+
+	if err := os.MkdirAll(m.storageDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir storage dir %s: %w", m.storageDir, err)
+	}
+
+	return storage.Open(opts)
 }
 
 func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
@@ -79,9 +91,15 @@ func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSche
 		scriptPath = "" // для exec не нужен
 	}
 
+	// open per-queue storage
+	st, err := m.openStoreForQueue(cfg.Name)
+	if err != nil {
+		return fmt.Errorf("open storage for queue %q: %w", cfg.Name, err)
+	}
+
 	rt, err := NewRuntime(
 		cfg,
-		m.store,
+		st,
 		m.log,
 		schema,
 		cmd,
@@ -90,6 +108,7 @@ func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSche
 		cfg.FPMAddress,
 	)
 	if err != nil {
+		_ = st.Close()
 		return err
 	}
 
@@ -123,6 +142,9 @@ func (m *Manager) ListNames() []string {
 	return out
 }
 
+// ReplaceQueue stops the old runtime and creates a new one with the given config.
+// The per-queue .db file is preserved — existing messages, idempotency keys and
+// expiration indices carry over to the new runtime.
 func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -130,6 +152,9 @@ func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.Compiled
 	// Останавливаем старую очередь если есть
 	if old, ok := m.queues[cfg.Name]; ok && old != nil {
 		old.Stop()
+		if oldStore, ok := old.Store.(interface{ Close() error }); ok {
+			_ = oldStore.Close()
+		}
 	}
 
 	rtStr := strings.TrimSpace(cfg.Runtime)
@@ -148,10 +173,16 @@ func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.Compiled
 		scriptPath = ""
 	}
 
+	// open per-queue storage
+	st, err := m.openStoreForQueue(cfg.Name)
+	if err != nil {
+		return fmt.Errorf("open storage for queue %q: %w", cfg.Name, err)
+	}
+
 	// создаем runtime
 	rt, err := NewRuntime(
 		cfg,
-		m.store,
+		st,
 		m.log,
 		schema,
 		cmd,
@@ -160,6 +191,7 @@ func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.Compiled
 		cfg.FPMAddress,
 	)
 	if err != nil {
+		_ = st.Close()
 		return err
 	}
 
@@ -175,7 +207,21 @@ func (m *Manager) DeleteQueue(name string) {
 
 	if ok && rt != nil {
 		rt.Stop()
+		if st, ok := rt.Store.(interface{ Close() error }); ok {
+			_ = st.Close()
+		}
 	}
+
+	// remove the per-queue .db file from disk
+	dbPath := filepath.Join(m.storageDir, name+".db")
+	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+		m.log.Error("failed to remove queue db file",
+			zap.String("queue", name),
+			zap.String("path", dbPath),
+			zap.Error(err),
+		)
+	}
+
 	m.log.Warn("queue_deleted", zap.String("queue", name))
 }
 
@@ -224,5 +270,8 @@ func (m *Manager) StopAll() {
 
 	for _, rt := range rts {
 		rt.Stop()
+		if st, ok := rt.Store.(interface{ Close() error }); ok {
+			_ = st.Close()
+		}
 	}
 }
