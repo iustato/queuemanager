@@ -2,15 +2,15 @@ package queue
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"fmt"
 
 	"go-web-server/internal/config"
 	"go-web-server/internal/storage"
@@ -288,10 +288,23 @@ func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWrite
 		FinishedAt int64  `json:"finished_at"`
 	}
 
-	// читаем тело: пустое — совместимость 204
-	body, _ := io.ReadAll(r.Body)
+	// read body with size limit (worker callback payload is small JSON)
+	const maxReportBody int64 = 64 * 1024 // 64 KB
+	body, err := readLimitedBody(w, r, maxReportBody)
+	if err != nil {
+		writeAPIError(w, r, http.StatusRequestEntityTooLarge,
+			"payload_too_large",
+			"request body too large",
+			nil,
+		)
+		return
+	}
 	if len(bytes.TrimSpace(body)) == 0 {
-		w.WriteHeader(http.StatusNoContent)
+		writeAPIError(w, r, http.StatusBadRequest,
+			"empty_body",
+			"request body is required (must contain exit_code, duration_ms, etc.)",
+			nil,
+		)
 		return
 	}
 
@@ -362,15 +375,17 @@ func parseFromTimeMs(r *http.Request) (int64, error) {
 }
 
 func checkWorkerToken(r *http.Request, token string) bool {
-	// X-Worker-Token
-	if strings.TrimSpace(r.Header.Get("X-Worker-Token")) == token {
+	// X-Worker-Token (constant-time comparison to prevent timing attacks)
+	got := strings.TrimSpace(r.Header.Get("X-Worker-Token"))
+	if len(got) > 0 && subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
 		return true
 	}
 	// Authorization: Bearer <token>
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	const pref = "Bearer "
 	if strings.HasPrefix(auth, pref) {
-		return strings.TrimSpace(strings.TrimPrefix(auth, pref)) == token
+		bearer := strings.TrimSpace(strings.TrimPrefix(auth, pref))
+		return subtle.ConstantTimeCompare([]byte(bearer), []byte(token)) == 1
 	}
 	return false
 }

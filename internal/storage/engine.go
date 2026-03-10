@@ -7,86 +7,90 @@ import (
     bolt "go.etcd.io/bbolt"
 )
 
-func (s *Store) GC(nowMs int64, maxDeletes int) (deleted int, err error) {
-    if nowMs == 0 {
-        nowMs = time.Now().UnixMilli()
-    }
+func (s *Store) GC(nowMs int64, maxDeletes int) ([]string, error) {
+	if nowMs == 0 {
+		nowMs = time.Now().UnixMilli()
+	}
 
-    return deleted, s.db.Update(func(tx *bolt.Tx) error {
+	var deletedIDs []string
+
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		bm := tx.Bucket(bMeta)
 		bb := tx.Bucket(bBody)
 		bi := tx.Bucket(bIdem)
 		be := tx.Bucket(bExp)
-		bp := tx.Bucket(bProc)    
-		bf := tx.Bucket(bEnqFail) 
+		bp := tx.Bucket(bProc)
+		bf := tx.Bucket(bEnqFail)
 
-		if bm == nil || bb == nil || bi == nil || be == nil || bf == nil {
+		if bm == nil || bb == nil || bi == nil || be == nil || bp == nil || bf == nil {
 			return ErrBucketMissing
 		}
 
-        c := be.Cursor()
-        for k, _ := c.First(); k != nil; {
-            expAt, msgID, ok := parseExpKey(k)
-            if !ok {
-                _ = be.Delete(k)
-                k, _ = c.Next()
-                continue
-            }
+		c := be.Cursor()
+		for k, _ := c.First(); k != nil; {
+			expAt, msgID, ok := parseExpKey(k)
+			if !ok {
+				_ = be.Delete(k)
+				k, _ = c.Next()
+				continue
+			}
 
-            if expAt > nowMs {
-                break
-            }
+			if expAt > nowMs {
+				break
+			}
 
-            nextK, _ := c.Next()
+			nextK, _ := c.Next()
 
-            mv := bm.Get([]byte(msgID))
-            if mv == nil {
-                _ = be.Delete(k)
-                k = nextK
-                continue
-            }
+			mv := bm.Get([]byte(msgID))
+			if mv == nil {
+				_ = be.Delete(k)
+				k = nextK
+				continue
+			}
 
-            var meta Meta
-            if err := msgpack.Unmarshal(mv, &meta); err != nil {
-                _ = bm.Delete([]byte(msgID))
-                _ = bb.Delete([]byte(msgID))
-                _ = be.Delete(k)
-                deleted++
-                k = nextK
-                continue
-            }
+			var meta Meta
+			if err := msgpack.Unmarshal(mv, &meta); err != nil {
+				_ = bm.Delete([]byte(msgID))
+				_ = bb.Delete([]byte(msgID))
+				_ = be.Delete(k)
+				deletedIDs = append(deletedIDs, msgID)
+				k = nextK
+				continue
+			}
 
-            if meta.Status == StatusProcessing {
-                _ = be.Delete(k)
-                newExp := nowMs + s.gcProcessingGraceMs
-                if err := be.Put(makeExpKey(newExp, msgID), []byte(msgID)); err != nil {
-                    return err
-                }
-            } else {
-                // FIX: чистим proc-индекс при финальном удалении (если известен lease)
-                if bp != nil && meta.LeaseUntilMs > 0 {
-                    _ = bp.Delete(makeProcKey(meta.LeaseUntilMs, msgID))
-                }
+			if meta.Status == StatusProcessing {
+				_ = be.Delete(k)
+				newExp := nowMs + s.gcProcessingGraceMs
+				if err := be.Put(makeExpKey(newExp, msgID), []byte(msgID)); err != nil {
+					return err
+				}
+			} else {
+				// чистим proc-индекс при финальном удалении (если известен lease)
+				if meta.LeaseUntilMs > 0 {
+					_ = bp.Delete(makeProcKey(meta.LeaseUntilMs, msgID))
+				}
 
-                _ = bm.Delete([]byte(msgID))
-                _ = bb.Delete([]byte(msgID))
-                _ = be.Delete(k)
+				_ = bm.Delete([]byte(msgID))
+				_ = bb.Delete([]byte(msgID))
+				_ = be.Delete(k)
 
-                if meta.IdempotencyKey != "" {
-                    if iv := bi.Get([]byte(meta.IdempotencyKey)); iv != nil && string(iv) == msgID {
-                        _ = bi.Delete([]byte(meta.IdempotencyKey))
-                    }
-                }
-                deleted++
-            }
+				if meta.IdempotencyKey != "" {
+					if iv := bi.Get([]byte(meta.IdempotencyKey)); iv != nil && string(iv) == msgID {
+						_ = bi.Delete([]byte(meta.IdempotencyKey))
+					}
+				}
+				deletedIDs = append(deletedIDs, msgID)
+			}
 
-            if maxDeletes > 0 && deleted >= maxDeletes {
-                break
-            }
-            k = nextK
-        }
-        return nil
-    })
+			if maxDeletes > 0 && len(deletedIDs) >= maxDeletes {
+				break
+			}
+			k = nextK
+		}
+		return nil
+	})
+
+	return deletedIDs, err
 }
 
 func (s *Store) RequeueStuck(nowMs int64, max int) (requeued int, err error) {

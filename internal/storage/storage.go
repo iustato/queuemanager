@@ -230,8 +230,6 @@ func (s *Store) GetByMsgID(msgID string) (Meta, []byte, error) {
 	return meta, body, err
 }
 
-
-
 func (s *Store) GetStatusAndResult(msgID string) (Status, Result, error) {
     var st Status
     var res Result
@@ -261,10 +259,6 @@ func (s *Store) GetStatusAndResult(msgID string) (Status, Result, error) {
 
     return st, res, err
 }
-
-
-
-
 
 
 

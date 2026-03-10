@@ -6,7 +6,7 @@ max_size: 100
 workers: 40
 
 runtime: php-fpm
-script: /mnt/c/Users/Den/Desktop/queue-service/configs/scripts/job.php
+script: configs/scripts/job.php
 
 fpm_network: unix
 fpm_address: /run/php/php8.3-fpm.sock

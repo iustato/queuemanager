@@ -42,8 +42,8 @@ func TestGC_ShouldDeleteExpiredMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc: %v", err)
 	}
-	if deleted < 1 {
-		t.Fatalf("expected at least 1 deleted message, got %d", deleted)
+	if len(deleted) < 1 {
+		t.Fatalf("expected at least 1 deleted message, got %d", len(deleted))
 	}
 
 	_, _, err = store.GetByMsgID(msgID)

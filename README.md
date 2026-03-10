@@ -57,7 +57,7 @@ Queue Service
 | Переменная               | Описание                          |
 | ------------------------ | --------------------------------- |
 | `QUEUES_CONFIG_DIR`      | директория YAML конфигов очередей |
-| `QUEUE_STORAGE_PATH`     | путь к BoltDB                     |
+| `QUEUE_STORAGE_DIR`      | директория хранения BoltDB (per-queue) |
 | `PUBLIC_ADDR`            | публичный HTTP адрес              |
 | `INTERNAL_ADDR`          | внутренний HTTP адрес             |
 | `ALLOW_AUTO_IDEMPOTENCY` | автогенерация Idempotency-Key     |
@@ -67,7 +67,7 @@ Queue Service
 ```bash
 ALLOW_AUTO_IDEMPOTENCY=true \
 QUEUES_CONFIG_DIR=./configs \
-QUEUE_STORAGE_PATH=./data/queue.db \
+QUEUE_STORAGE_DIR=./data \
 go run ./cmd/server
 ```
 
@@ -189,6 +189,30 @@ X-Message-Id: <msg_id>
 Idempotency-Key: <key>
 X-Request-Id: <request_id>
 ```
+
+---
+
+# Idempotency-Key
+
+Для защиты от дублирования задач можно передать заголовок `Idempotency-Key` при создании сообщения.
+
+**Требования к формату:**
+
+* Значение должно быть валидным **UUIDv7** (RFC 9562).
+* Другие версии UUID (v4, v1 и т.д.) или произвольные строки **не принимаются** — сервер вернёт `422`.
+
+Пример:
+
+```bash
+curl -X POST "http://localhost:8080/generate_report/newmessage" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 019503a0-7e2a-7000-8000-000000000001" \
+  -d '{"report_type":"transactions","period":{"from":"2025-01-01T00:00:00Z","to":"2025-01-31T23:59:59Z"}}'
+```
+
+Если сообщение с таким ключом уже существует — вернётся `409 duplicate_message`.
+
+Если переменная `ALLOW_AUTO_IDEMPOTENCY=true`, сервер автоматически сгенерирует UUIDv7 при отсутствии заголовка.
 
 ---
 

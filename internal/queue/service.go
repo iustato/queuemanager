@@ -134,6 +134,11 @@ func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse,
 	}
 
 	if err := rt.Enqueue(ctx, job); err != nil {
+		// Message was persisted (created=true) but failed to enter the in-memory
+		// queue. Mark it as enqueue-failed so RequeueStuck can pick it up later.
+		if rt.Store != nil {
+			_ = rt.Store.MarkEnqueueFailed(effectiveMsgID, err.Error())
+		}
 		return PushResponse{
 			MsgID:   effectiveMsgID,
 			IdemKey: idemKey,

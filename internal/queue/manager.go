@@ -258,15 +258,17 @@ func (m *Manager) Enqueue(ctx context.Context, queueName, msgID string, body []b
 }
 
 func (m *Manager) StopAll() {
-	m.mu.RLock()
-	// Копируем указатели, чтобы не держать замок менеджера во время остановок
+	m.mu.Lock()
+	// Move all runtimes out of the map under exclusive lock so no other
+	// goroutine can access them after this point.
 	rts := make([]*Runtime, 0, len(m.queues))
 	for _, rt := range m.queues {
 		if rt != nil {
 			rts = append(rts, rt)
 		}
 	}
-	m.mu.RUnlock()
+	m.queues = make(map[string]*Runtime)
+	m.mu.Unlock()
 
 	for _, rt := range rts {
 		rt.Stop()

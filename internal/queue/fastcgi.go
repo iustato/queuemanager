@@ -52,11 +52,10 @@ func (r *PooledFastCGIRunner) makeResultOut(job Job, start time.Time, exitCode i
 }
 
 func (r *PooledFastCGIRunner) resetClient() {
-    if r.client != nil {
-        r.client.Close() 
-        
-        r.client = nil
-    }
+	if r.client != nil {
+		r.client.Close()
+		r.client = nil
+	}
 }
 
 func (r *PooledFastCGIRunner) ensureClient(ctx context.Context) (*fcgiclient.FCGIClient, error) {
@@ -109,7 +108,7 @@ func (r *PooledFastCGIRunner) Run(ctx context.Context, _ []string, script string
 		return r.makeResult(job, start, 1, 0, fmt.Errorf("abs script path: %w", err))
 	}
 
-	params := buildPhpEnvMap(script, job)
+	params := buildPhpEnvMap(absScript, job)
 
 	serverName := strings.TrimSpace(r.ServerName)
 	if serverName == "" {

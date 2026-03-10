@@ -50,9 +50,12 @@ type mockStore struct {
 	failMarkDone            error
 	failGetStatusAndResult  error
 	failGetInfo             error
-	failGetInfoAll          error
 	failRequeueStuck        error
 	failGC                  error
+
+	// call counters for assertions
+	requeueStuckCalled int
+	gcCalled           int
 }
 
 type mockMsg struct {
@@ -240,32 +243,24 @@ func (ms *mockStore) GetInfo(queueName string, fromTime int64) (storage.QueueInf
 	return storage.QueueInfo{}, nil
 }
 
-func (ms *mockStore) GetInfoAll(fromTime int64) (map[string]storage.QueueInfo, error) {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-
-	if ms.failGetInfoAll != nil {
-		return nil, ms.failGetInfoAll
-	}
-	return map[string]storage.QueueInfo{}, nil
-}
-
 func (ms *mockStore) RequeueStuck(now int64, limit int) (int, error) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
+	ms.requeueStuckCalled++
 	if ms.failRequeueStuck != nil {
 		return 0, ms.failRequeueStuck
 	}
 	return 0, nil
 }
 
-func (ms *mockStore) GC(now int64, limit int) (int, error) {
+func (ms *mockStore) GC(now int64, limit int) ([]string, error) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
+	ms.gcCalled++
 	if ms.failGC != nil {
-		return 0, ms.failGC
+		return nil, ms.failGC
 	}
-	return 0, nil
+	return nil, nil
 }

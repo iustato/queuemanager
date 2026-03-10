@@ -73,11 +73,10 @@ type QueueStore interface {
 	// Read API
 	GetStatusAndResult(msgID string) (storage.Status, storage.Result, error)
 	GetInfo(queueName string, fromTime int64) (storage.QueueInfo, error)
-	GetInfoAll(fromTime int64) (map[string]storage.QueueInfo, error)
 
 	// Background maintenance
 	RequeueStuck(now int64, limit int) (int, error)
-	GC(now int64, limit int) (int, error)
+	GC(now int64, limit int) ([]string, error)
 }
 
 type Runtime struct {
@@ -119,7 +118,7 @@ func NewRuntime(
 	}
 
 	rtStr := strings.TrimSpace(cfg.Runtime)
-kind := RuntimeKind(rtStr)
+	kind := RuntimeKind(rtStr)
 
 	// BACKWARD COMPAT: если runtime не задан, но команда есть — считаем exec
 	if kind == "" {
@@ -181,9 +180,12 @@ kind := RuntimeKind(rtStr)
 	}
 
 	// ---- log dir (optional optimization) ----
-	logDir := filepath.Join(cfg.LogDir, cfg.Name)
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		l.Warn("mkdir_queue_log_dir_failed", zap.String("path", logDir), zap.Error(err))
+	var logDir string
+	if cfg.LogDir != "" {
+		logDir = filepath.Join(cfg.LogDir, cfg.Name)
+		if err := os.MkdirAll(logDir, 0o755); err != nil {
+			l.Warn("mkdir_queue_log_dir_failed", zap.String("path", logDir), zap.Error(err))
+		}
 	}
 
 	// ---- parse durations from config ----
@@ -350,8 +352,9 @@ func (rt *Runtime) Enqueue(ctx context.Context, job Job) error {
 	}
 }
 
-// Stop is a "fast" stop: workers exit on quit even if jobs channel still contains items.
-// This is acceptable if messages are persisted and will be requeued later (at-least-once).
+// Stop closes the jobs channel and signals quit. Workers drain the channel but
+// skip processing once quit is closed. Persisted messages will be re-enqueued
+// by RequeueStuck on next startup (at-least-once delivery).
 func (rt *Runtime) Stop() {
 	if rt.st == nil {
 		return
@@ -462,7 +465,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 						now := time.Now().UnixMilli()
 						ttlMs := time.Now().Add(rt.st.resultTTL).UnixMilli()
 
-						_ = rt.Store.MarkDone(
+						if err := rt.Store.MarkDone(
 							job.MsgID,
 							storage.StatusFailed,
 							storage.Result{
@@ -472,7 +475,12 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 								Err:        "panic recovered",
 							},
 							ttlMs,
-						)
+						); err != nil {
+							rt.st.log.Error("mark_done_after_panic_failed",
+								zap.String("msg_id", job.MsgID),
+								zap.Error(err),
+							)
+						}
 					}
 				}
 			}()
@@ -628,11 +636,12 @@ func (rt *Runtime) maintenanceLoop() {
 
 		case <-gcTicker.C:
 			if rt.Store != nil {
-				n, err := rt.Store.GC(0, gcBatch)
+				deletedIDs, err := rt.Store.GC(0, gcBatch)
 				if err != nil {
 					rt.st.log.Warn("gc_failed", zap.Error(err))
-				} else if n > 0 {
-					rt.st.log.Info("gc_done", zap.Int("deleted", n))
+				} else if len(deletedIDs) > 0 {
+					rt.st.log.Info("gc_done", zap.Int("deleted", len(deletedIDs)))
+					rt.cleanupLogFiles(deletedIDs)
 				}
 			}
 		}
@@ -683,6 +692,23 @@ func (rt *Runtime) appendStdStreams(job Job, out, errb []byte) {
 		_, _ = f.Write(errb)
 		if errb[len(errb)-1] != '\n' {
 			_, _ = f.WriteString("\n")
+		}
+	}
+}
+
+// cleanupLogFiles removes log files for messages deleted by GC.
+func (rt *Runtime) cleanupLogFiles(msgIDs []string) {
+	if rt.st == nil {
+		return
+	}
+	dir := rt.st.logDir
+	if dir == "" {
+		return
+	}
+	for _, id := range msgIDs {
+		p := filepath.Join(dir, id+".log")
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			rt.st.log.Warn("remove_job_log_failed", zap.String("path", p), zap.Error(err))
 		}
 	}
 }

@@ -66,8 +66,8 @@ func TestGC_DeletesNonProcessingMessage_AndCleansIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GC: %v", err)
 	}
-	if deleted != 1 {
-		t.Fatalf("expected deleted=1, got %d", deleted)
+	if len(deleted) != 1 {
+		t.Fatalf("expected deleted=1, got %d", len(deleted))
 	}
 
 	// meta/body removed

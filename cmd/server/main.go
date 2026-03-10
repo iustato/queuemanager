@@ -268,6 +268,21 @@ func main() {
 		logger.Error("internal shutdown failed", zap.Error(err))
 	}
 
-	// stop runtimes (workers + per-queue maintenance)
-	qm.StopAll()
+	// stop runtimes (workers + per-queue maintenance) with a timeout
+	// to prevent hanging indefinitely on stuck workers
+	stopDone := make(chan struct{})
+	go func() {
+		qm.StopAll()
+		close(stopDone)
+	}()
+
+	stopTimeout := time.Duration(envInt("STOP_ALL_TIMEOUT_SEC", 30)) * time.Second
+	select {
+	case <-stopDone:
+		logger.Info("all queues stopped gracefully")
+	case <-time.After(stopTimeout):
+		logger.Error("StopAll timed out, forcing exit",
+			zap.Duration("timeout", stopTimeout),
+		)
+	}
 }

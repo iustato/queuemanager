@@ -5,7 +5,6 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
-	"strings"
 )
 
 // buildPhpEnvMap — Единый источник правды для всех переменных
@@ -46,51 +45,6 @@ func stripPort(addr string) string {
 	host, _, err := net.SplitHostPort(addr)
 	if err == nil { return host }
 	return addr
-}
-
-func splitCGI(out []byte) (map[string]string, []byte) {
-	h := map[string]string{}
-
-	sep := []byte("\r\n\r\n")
-	i := bytes.Index(out, sep)
-	if i < 0 {
-		sep = []byte("\n\n")
-		i = bytes.Index(out, sep)
-	}
-	if i < 0 {
-		return h, out
-	}
-
-	headerPart := out[:i]
-	body := out[i+len(sep):]
-
-	lines := bytes.Split(headerPart, []byte("\n"))
-	for _, ln := range lines {
-		ln = bytes.TrimSpace(bytes.TrimRight(ln, "\r"))
-		if len(ln) == 0 {
-			continue
-		}
-		col := bytes.IndexByte(ln, ':')
-		if col <= 0 {
-			continue
-		}
-		k := strings.ToLower(strings.TrimSpace(string(ln[:col])))
-		v := strings.TrimSpace(string(ln[col+1:]))
-		h[k] = v
-	}
-
-	return h, body
-}
-
-func safeCmd(cmd []string) string {
-	switch len(cmd) {
-	case 0:
-		return "none"
-	case 1:
-		return cmd[0]
-	default:
-		return strings.Join(cmd[:2], " ")
-	}
 }
 
 const (

@@ -96,8 +96,8 @@ func TestGC_ProcessingMessage_IsNotDeleted_AndExpIsPushed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GC: %v", err)
 	}
-	if deleted != 0 {
-		t.Fatalf("expected deleted=0, got %d", deleted)
+	if len(deleted) != 0 {
+		t.Fatalf("expected deleted=0, got %d", len(deleted))
 	}
 
 	// meta/body still exist
