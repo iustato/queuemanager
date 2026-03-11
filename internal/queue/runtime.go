@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,6 +83,7 @@ type Runtime struct {
 	// Runtime is immutable after NewRuntime.
 	Cfg        config.QueueConfig
 	Schema     *validate.CompiledSchema
+	SchemaJSON json.RawMessage // raw JSON schema for GET /{queue}/schema
 	Kind       RuntimeKind
 	Command    []string
 	ScriptPath string

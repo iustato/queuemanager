@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -54,6 +55,14 @@ func main() {
 	qm := queue.NewManager(logger, sc.QueueStorageDir, storageOpts, sc.WorkerToken, sc.AllowAutoGUID, sc.PhpCgiBin)
 
 	for _, qc := range cfgs {
+		schemaRaw, err := os.ReadFile(qc.SchemaFile)
+		if err != nil {
+			logger.Fatal("read schema file",
+				zap.String("queue", qc.Name),
+				zap.String("schema_file", qc.SchemaFile),
+				zap.Error(err),
+			)
+		}
 		sch, err := validate.LoadSchemaFromFile(qc.SchemaFile)
 		if err != nil {
 			logger.Fatal("load schema",
@@ -62,7 +71,7 @@ func main() {
 				zap.Error(err),
 			)
 		}
-		if err := qm.AddQueue(qc, sch); err != nil {
+		if err := qm.AddQueue(qc, sch, json.RawMessage(schemaRaw)); err != nil {
 			logger.Fatal("add queue",
 				zap.String("queue", qc.Name),
 				zap.Error(err),
@@ -151,6 +160,15 @@ func main() {
 				return
 			}
 			qm.HandleGetInfo(parts[0], w, r)
+			return
+		}
+
+		if len(parts) == 2 && parts[1] == "schema" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			qm.HandleGetSchema(parts[0], w, r)
 			return
 		}
 

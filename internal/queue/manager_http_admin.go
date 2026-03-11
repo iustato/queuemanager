@@ -73,7 +73,7 @@ func (m *Manager) HandleAddQueue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := m.AddQueue(cfg, schema); err != nil {
+	if err := m.AddQueue(cfg, schema, req.Schema); err != nil {
 		if strings.Contains(err.Error(), "already exists") {
 			writeAPIError(w, r, http.StatusConflict, "queue_exists", err.Error(), nil)
 			return
@@ -119,7 +119,7 @@ func (m *Manager) HandleUpdateQueue(queueName string, w http.ResponseWriter, r *
 		}
 	}
 
-	if err := m.ReplaceQueue(cfg, schema); err != nil {
+	if err := m.ReplaceQueue(cfg, schema, req.Schema); err != nil {
 		writeAPIError(w, r, http.StatusInternalServerError, "internal", err.Error(), nil)
 		return
 	}

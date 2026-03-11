@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -64,7 +65,7 @@ func (m *Manager) openStoreForQueue(queueName string) (*storage.Store, error) {
 	return storage.Open(opts)
 }
 
-func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
+func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSchema, schemaJSON ...json.RawMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -113,6 +114,10 @@ func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSche
 		return err
 	}
 
+	if len(schemaJSON) > 0 && len(schemaJSON[0]) > 0 {
+		rt.SchemaJSON = schemaJSON[0]
+	}
+
 	m.queues[cfg.Name] = rt
 
 	m.log.Info("queue_registered_and_started",
@@ -146,7 +151,7 @@ func (m *Manager) ListNames() []string {
 // ReplaceQueue stops the old runtime and creates a new one with the given config.
 // The per-queue .db file is preserved — existing messages and
 // expiration indices carry over to the new runtime.
-func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
+func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.CompiledSchema, schemaJSON ...json.RawMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -195,6 +200,10 @@ func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.Compiled
 	if err != nil {
 		_ = st.Close()
 		return err
+	}
+
+	if len(schemaJSON) > 0 && len(schemaJSON[0]) > 0 {
+		rt.SchemaJSON = schemaJSON[0]
 	}
 
 	m.queues[cfg.Name] = rt

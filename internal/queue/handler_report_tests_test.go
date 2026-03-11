@@ -120,7 +120,7 @@ func TestHandleReportDone_Success_MarksDone(t *testing.T) {
 	}
 	_, _, _, err := rt.Store.PutNewMessage(
 		t.Context(),
-		q, "msg1", []byte(`{}`), "", time.Now().UnixMilli(), 0,
+		q, "msg1", []byte(`{}`), time.Now().UnixMilli(), 0,
 	)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
@@ -146,7 +146,7 @@ func TestHandleReportDone_ExitCodeNonZero_StatusFailed(t *testing.T) {
 	rt, _ := m.Get(q)
 	_, _, _, _ = rt.Store.PutNewMessage(
 		t.Context(),
-		q, "msg2", []byte(`{}`), "", time.Now().UnixMilli(), 0,
+		q, "msg2", []byte(`{}`), time.Now().UnixMilli(), 0,
 	)
 	_ = rt.Store.MarkProcessing("msg2", 1)
 
@@ -196,7 +196,7 @@ func TestHandleReportDone_WorkerToken_Unauthorized(t *testing.T) {
 	rt, _ := m.Get("q1")
 	_, _, _, _ = rt.Store.PutNewMessage(
 		t.Context(),
-		"q1", "msg1", []byte(`{}`), "", time.Now().UnixMilli(), 0,
+		"q1", "msg1", []byte(`{}`), time.Now().UnixMilli(), 0,
 	)
 	_ = rt.Store.MarkProcessing("msg1", 1)
 
@@ -222,7 +222,7 @@ func TestHandleReportDone_BearerToken_Authorized(t *testing.T) {
 	rt, _ := m.Get("q1")
 	_, _, _, _ = rt.Store.PutNewMessage(
 		t.Context(),
-		"q1", "msg1", []byte(`{}`), "", time.Now().UnixMilli(), 0,
+		"q1", "msg1", []byte(`{}`), time.Now().UnixMilli(), 0,
 	)
 	_ = rt.Store.MarkProcessing("msg1", 1)
 

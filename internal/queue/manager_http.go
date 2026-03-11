@@ -16,6 +16,42 @@ import (
 	"go-web-server/internal/storage"
 )
 
+// GET /{queue}/schema
+func (m *Manager) HandleGetSchema(queueName string, w http.ResponseWriter, r *http.Request) {
+	queueName = strings.TrimSpace(queueName)
+	if queueName == "" {
+		writeAPIError(w, r, http.StatusBadRequest,
+			"bad_request",
+			"queue is required",
+			nil,
+		)
+		return
+	}
+	rt, ok := m.Get(queueName)
+	if !ok || rt == nil {
+		writeAPIError(w, r, http.StatusNotFound,
+			"queue_not_found",
+			"unknown queue",
+			map[string]any{"queue": queueName},
+		)
+		return
+	}
+
+	if len(rt.SchemaJSON) == 0 {
+		writeAPIError(w, r, http.StatusNotFound,
+			"schema_not_found",
+			"no schema configured for this queue",
+			map[string]any{"queue": queueName},
+		)
+		return
+	}
+
+	writeAPIOK(w, r, http.StatusOK, map[string]any{
+		"queue":  queueName,
+		"schema": json.RawMessage(rt.SchemaJSON),
+	})
+}
+
 func (m *Manager) HandleGetInfoAll(w http.ResponseWriter, r *http.Request) {
 	fromMs, err := parseFromTimeMs(r)
 	if err != nil {
