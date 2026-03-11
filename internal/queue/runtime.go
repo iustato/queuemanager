@@ -67,6 +67,9 @@ type QueueStore interface {
 	// Retry scheduling (persist before planning retry in memory)
 	RequeueForRetry(guid string, ts int64) error
 
+	// Replace message body (worker returned new body via structured stdout)
+	UpdateBody(guid string, body []byte) error
+
 	// Finish
 	MarkDone(guid string, status storage.Status, res storage.Result, ttl int64) error
 
@@ -514,6 +517,21 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 			res := runner.Run(ctx, currentCmd, scriptPath, job)
 			cancel()
 
+			// Parse structured stdout: {"output":"...","body":{...}}
+			ws := parseWorkerStdout(res.Stdout)
+
+			// If worker returned a new body — update storage and in-memory job (affects retries)
+			if len(ws.Body) > 0 && rt.Store != nil {
+				if err := rt.Store.UpdateBody(job.MessageGUID, []byte(ws.Body)); err != nil {
+					rt.st.log.Warn("update_body_failed",
+						zap.String("message_guid", job.MessageGUID),
+						zap.Error(err),
+					)
+				} else {
+					job.Body = []byte(ws.Body)
+				}
+			}
+
 			rt.appendStdStreams(job, res.Stdout, res.Stderr)
 
 			failed := (res.ExitCode != 0 || res.Err != nil)
@@ -567,6 +585,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 						ExitCode:   res.ExitCode,
 						DurationMs: res.DurationMs,
 						Err:        errString(res.Err),
+						Output:     ws.Output,
 					},
 					ttlMs,
 				)

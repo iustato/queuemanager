@@ -1,5 +1,5 @@
 # Бинарные файлы и исполняемые файлы Go
-/queue_service
+/queue-service
 /server
 /cmd/server/server
 /cmd/load_test/load_test

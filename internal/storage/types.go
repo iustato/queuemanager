@@ -57,6 +57,7 @@ type Result struct {
 	DurationMs int64  `msgpack:"DurationMs" json:"duration_ms"`
 	Err        string `msgpack:"Err,omitempty" json:"err,omitempty"`
 	FinishedAt int64  `msgpack:"FinishedAt,omitempty" json:"finished_at_ms,omitempty"`
+	Output     string `msgpack:"Output,omitempty" json:"output,omitempty"`
 }
 
 type QueueInfo struct {

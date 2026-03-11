@@ -469,3 +469,15 @@ func (s *Store) MarkDone(guid string, status Status, res Result, newExpiresAtMs 
 		return nil
 	})
 }
+
+// UpdateBody replaces the message body stored for guid in bBody.
+// Used when a worker returns a new body via structured stdout.
+func (s *Store) UpdateBody(guid string, body []byte) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bb := tx.Bucket(bBody)
+		if bb == nil {
+			return ErrBucketMissing
+		}
+		return bb.Put([]byte(guid), body)
+	})
+}

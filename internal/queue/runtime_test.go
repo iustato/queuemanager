@@ -183,6 +183,18 @@ func (ms *mockStore) RequeueForRetry(guid string, ts int64) error {
 	return nil
 }
 
+func (ms *mockStore) UpdateBody(guid string, body []byte) error {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	m, ok := ms.msg[guid]
+	if ok {
+		m.Body = append([]byte(nil), body...)
+		ms.msg[guid] = m
+	}
+	return nil
+}
+
 func (ms *mockStore) MarkDone(guid string, status storage.Status, res storage.Result, ttl int64) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()

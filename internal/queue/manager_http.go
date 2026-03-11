@@ -14,6 +14,8 @@ import (
 
 	"go-web-server/internal/config"
 	"go-web-server/internal/storage"
+
+	"go.uber.org/zap"
 )
 
 // GET /{queue}/schema
@@ -317,11 +319,13 @@ func (m *Manager) HandleReportDone(queueName, guid string, w http.ResponseWriter
 	}
 
 	type payload struct {
-		ExitCode   int    `json:"exit_code"`
-		DurationMs int64  `json:"duration_ms"`
-		Err        string `json:"err"`
-		TTLms      int64  `json:"ttl_ms"`
-		FinishedAt int64  `json:"finished_at"`
+		ExitCode   int             `json:"exit_code"`
+		DurationMs int64           `json:"duration_ms"`
+		Err        string          `json:"err"`
+		TTLms      int64           `json:"ttl_ms"`
+		FinishedAt int64           `json:"finished_at"`
+		Output     string          `json:"output,omitempty"`
+		Body       json.RawMessage `json:"body,omitempty"`
 	}
 
 	// read body with size limit (worker callback payload is small JSON)
@@ -375,11 +379,22 @@ func (m *Manager) HandleReportDone(queueName, guid string, w http.ResponseWriter
 		}
 	}
 
+	if len(p.Body) > 0 && string(p.Body) != "null" {
+		if err := rt.Store.UpdateBody(guid, []byte(p.Body)); err != nil {
+			m.log.Warn("report_done_update_body_failed",
+				zap.String("queue", queueName),
+				zap.String("message_guid", guid),
+				zap.Error(err),
+			)
+		}
+	}
+
 	if err := rt.Store.MarkDone(guid, status, storage.Result{
 		FinishedAt: finishedAt,
 		ExitCode:   p.ExitCode,
 		DurationMs: p.DurationMs,
 		Err:        strings.TrimSpace(p.Err),
+		Output:     p.Output,
 	}, ttl); err != nil {
 		writeAPIError(w, r, http.StatusInternalServerError,
 			"internal",
