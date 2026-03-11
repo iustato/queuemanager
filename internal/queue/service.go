@@ -1,24 +1,22 @@
 package queue
 
 import (
-    "context"
-    "errors"
-    "fmt"
-    "strings"
-    "time"
+	"context"
+	"errors"
+	"strings"
+	"time"
 
-    "go-web-server/internal/config"
-    uuidutil "go-web-server/internal/uuid"
-    "go-web-server/internal/validate"
+	"go-web-server/internal/config"
+	uuidutil "go-web-server/internal/uuid"
+	"go-web-server/internal/validate"
 
-    "github.com/google/uuid"
+	"github.com/google/uuid"
 )
 
 type PushRequest struct {
-	Queue    string
-	Body     []byte
-	IdemKey  string
-	AutoIdem bool
+	Queue       string
+	Body        []byte
+	MessageGUID string
 
 	Method      string
 	QueryString string
@@ -27,11 +25,10 @@ type PushRequest struct {
 }
 
 type PushResponse struct {
-	MsgID   string
-	IdemKey string
-	Created bool // false => dedup
-
-	Queued bool // true => rt.Enqueue succeeded and MarkQueued done
+	MessageGUID  string
+	Created      bool  // false => dedup
+	Queued       bool  // true => rt.Enqueue succeeded and MarkQueued done
+	CreatedAtMs  int64 // first registration timestamp (ms since epoch)
 }
 
 type QueueService struct {
@@ -40,18 +37,22 @@ type QueueService struct {
 
 func NewQueueService(mgr *Manager) *QueueService { return &QueueService{mgr: mgr} }
 
-type ErrInvalidIdemKey struct{ Msg string }
-func (e ErrInvalidIdemKey) Error() string { return e.Msg }
+type ErrInvalidMessageGUID struct{ Msg string }
+
+func (e ErrInvalidMessageGUID) Error() string { return e.Msg }
 
 type ErrInvalidJSON struct{ Cause error }
+
 func (e ErrInvalidJSON) Error() string { return "invalid json" }
 func (e ErrInvalidJSON) Unwrap() error { return e.Cause }
 
 type ErrSchemaValidation struct{ Cause error }
+
 func (e ErrSchemaValidation) Error() string { return "schema validation failed" }
 func (e ErrSchemaValidation) Unwrap() error { return e.Cause }
 
 type ErrPayloadTooLarge struct{ LimitBytes int64 }
+
 func (e ErrPayloadTooLarge) Error() string { return "payload too large" }
 
 func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse, error) {
@@ -64,7 +65,7 @@ func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse,
 		return PushResponse{}, ErrQueueNotFound
 	}
 
-	idemKey, err := normalizeIdemKey(req.IdemKey, req.AutoIdem)
+	guid, err := normalizeMessageGUID(req.MessageGUID, s.resolveAllowAutoGUID(rt))
 	if err != nil {
 		return PushResponse{}, err
 	}
@@ -84,93 +85,95 @@ func (s *QueueService) Push(ctx context.Context, req PushRequest) (PushResponse,
 		return PushResponse{}, ErrSchemaValidation{Cause: err}
 	}
 
-	msgID, err := uuidutil.NewV7()
-	if err != nil {
-		return PushResponse{}, fmt.Errorf("msg_id_generation_failed: %w", err)
-	}
-	effectiveMsgID := msgID
-
 	messageExpiry, _ := config.ParseDurationExt(rt.Cfg.MessageExpiry)
 	if messageExpiry <= 0 {
 		messageExpiry = 30 * 24 * time.Hour
 	}
 	expiresAtMs := time.Now().Add(messageExpiry).UnixMilli()
 
+	nowMs := time.Now().UnixMilli()
+	createdAtMs := nowMs
+
 	if rt.Store != nil {
-		storedMsgID, wasCreated, err := rt.Store.PutNewMessage(
+		_, wasCreated, storedAtMs, err := rt.Store.PutNewMessage(
 			ctx,
 			req.Queue,
-			msgID,
+			guid,
 			req.Body,
-			idemKey,
-			time.Now().UnixMilli(),
+			nowMs,
 			expiresAtMs,
 		)
 		if err != nil {
-			return PushResponse{MsgID: msgID, IdemKey: idemKey}, err
+			return PushResponse{MessageGUID: guid, CreatedAtMs: storedAtMs}, err
 		}
+		createdAtMs = storedAtMs
 		if !wasCreated {
 			return PushResponse{
-				MsgID:   storedMsgID,
-				IdemKey: idemKey,
-				Created: false,
-				Queued:  false,
+				MessageGUID: guid,
+				Created:     false,
+				Queued:      false,
+				CreatedAtMs: createdAtMs,
 			}, nil
 		}
-		effectiveMsgID = storedMsgID
 	}
 
 	job := Job{
-		Queue:          req.Queue,
-		MsgID:          effectiveMsgID,
-		Body:           req.Body,
-		EnqueuedAt:     time.Now(),
-		Attempt:        1,
-		Method:         req.Method,
-		QueryString:    req.QueryString,
-		ContentType:    req.ContentType,
-		RemoteAddr:     req.RemoteAddr,
-		IdempotencyKey: idemKey,
+		Queue:       req.Queue,
+		MessageGUID: guid,
+		Body:        req.Body,
+		EnqueuedAt:  time.Now(),
+		Attempt:     1,
+		Method:      req.Method,
+		QueryString: req.QueryString,
+		ContentType: req.ContentType,
+		RemoteAddr:  req.RemoteAddr,
 	}
 
 	if err := rt.Enqueue(ctx, job); err != nil {
-		// Message was persisted (created=true) but failed to enter the in-memory
-		// queue. Mark it as enqueue-failed so RequeueStuck can pick it up later.
 		if rt.Store != nil {
-			_ = rt.Store.MarkEnqueueFailed(effectiveMsgID, err.Error())
+			_ = rt.Store.MarkEnqueueFailed(guid, err.Error())
 		}
 		return PushResponse{
-			MsgID:   effectiveMsgID,
-			IdemKey: idemKey,
-			Created: true,
-			Queued:  false,
+			MessageGUID: guid,
+			Created:     true,
+			Queued:      false,
+			CreatedAtMs: createdAtMs,
 		}, err
 	}
 
 	if rt.Store != nil {
-		if err := rt.Store.MarkQueued(effectiveMsgID); err != nil {
+		if err := rt.Store.MarkQueued(guid); err != nil {
 			return PushResponse{
-				MsgID:   effectiveMsgID,
-				IdemKey: idemKey,
-				Created: true,
-				Queued:  true,
+				MessageGUID: guid,
+				Created:     true,
+				Queued:      true,
+				CreatedAtMs: createdAtMs,
 			}, err
 		}
 	}
 
 	return PushResponse{
-		MsgID:   effectiveMsgID,
-		IdemKey: idemKey,
-		Created: true,
-		Queued:  true,
+		MessageGUID: guid,
+		Created:     true,
+		Queued:      true,
+		CreatedAtMs: createdAtMs,
 	}, nil
 }
 
-func normalizeIdemKey(raw string, auto bool) (string, error) {
+// resolveAllowAutoGUID returns per-queue config if set, otherwise the global env var default.
+func (s *QueueService) resolveAllowAutoGUID(rt *Runtime) bool {
+	if rt.Cfg.AllowAutoGUID != nil {
+		return *rt.Cfg.AllowAutoGUID
+	}
+	return s.mgr.allowAutoGUID
+}
+
+// normalizeMessageGUID validates or auto-generates a UUIDv7 MessageGUID.
+func normalizeMessageGUID(raw string, allowAutoGUID bool) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		if !auto {
-			return "", ErrInvalidIdemKey{Msg: "missing Idempotency-Key header"}
+		if !allowAutoGUID {
+			return "", ErrInvalidMessageGUID{Msg: "X-Message-GUID header is required"}
 		}
 		gen, err := uuidutil.NewV7()
 		if err != nil {
@@ -181,13 +184,12 @@ func normalizeIdemKey(raw string, auto bool) (string, error) {
 
 	parsed, err := uuid.Parse(raw)
 	if err != nil {
-		return "", ErrInvalidIdemKey{Msg: "invalid Idempotency-Key format"}
+		return "", ErrInvalidMessageGUID{Msg: "invalid X-Message-GUID format"}
 	}
 	if parsed.Version() != uuid.Version(7) {
-		return "", ErrInvalidIdemKey{Msg: "Idempotency-Key must be UUIDv7"}
+		return "", ErrInvalidMessageGUID{Msg: "X-Message-GUID must be UUIDv7"}
 	}
 	return raw, nil
 }
 
-// чтобы go vet не ругался, если где-то хочешь errors.Is на schema/json
 var _ = errors.Is

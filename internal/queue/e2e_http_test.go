@@ -65,13 +65,13 @@ func writeTempSchemaFile(t *testing.T, dir string) string {
 	return path
 }
 
-func doPostNewMessage(t *testing.T, baseURL, queueName string, body []byte, idemKey string) (status int, msgID string, respBody string, respHeaders http.Header) {
+func doPostNewMessage(t *testing.T, baseURL, queueName string, body []byte, guid string) (status int, msgGUID string, respBody string, respHeaders http.Header) {
 	t.Helper()
 
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/"+queueName+"/newmessage", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if idemKey != "" {
-		req.Header.Set("Idempotency-Key", idemKey)
+	if guid != "" {
+		req.Header.Set("X-Message-GUID", guid)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -81,7 +81,20 @@ func doPostNewMessage(t *testing.T, baseURL, queueName string, body []byte, idem
 	defer resp.Body.Close()
 
 	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, resp.Header.Get("X-Message-Id"), string(b), resp.Header.Clone()
+
+	// Parse message_guid from JSON response body when accepted
+	if resp.StatusCode == http.StatusAccepted {
+		var ar apiResp
+		if err := json.Unmarshal(b, &ar); err == nil && ar.Data != nil {
+			var data struct {
+				MessageGUID string `json:"message_guid"`
+			}
+			_ = json.Unmarshal(ar.Data, &data)
+			return resp.StatusCode, data.MessageGUID, string(b), resp.Header.Clone()
+		}
+	}
+
+	return resp.StatusCode, resp.Header.Get("X-Message-GUID"), string(b), resp.Header.Clone()
 }
 
 // --- API contract helpers ---
@@ -244,7 +257,6 @@ type e2eServerOpts struct{}
 func newE2EServer(t *testing.T, _ e2eServerOpts) (ts *httptest.Server, qm *Manager, cleanup func()) {
 	t.Helper()
 
-	_ = os.Setenv("ALLOW_AUTO_IDEMPOTENCY", "true") // чтобы можно было без Idempotency-Key
 	logger := zap.NewNop()
 
 	// temp directory for per-queue bolt files
@@ -252,7 +264,7 @@ func newE2EServer(t *testing.T, _ e2eServerOpts) (ts *httptest.Server, qm *Manag
 
 	qm = NewManager(logger, storageDir, storage.OpenOptions{
 		Timeout: 2 * time.Second,
-	})
+	}, "", true, "")
 
 	// temp schema file
 	schemaPath := filepath.Join(t.TempDir(), "schema.json")
@@ -323,7 +335,7 @@ func newE2EServer(t *testing.T, _ e2eServerOpts) (ts *httptest.Server, qm *Manag
 	return ts, qm, cleanup
 }
 
-func postNewMessage(t *testing.T, baseURL, queue, bodyJSON, idemKey string) (msgID string, idem string) {
+func postNewMessage(t *testing.T, baseURL, queue, bodyJSON, guid string) (msgGUID string) {
 	t.Helper()
 
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/"+queue+"/newmessage", strings.NewReader(bodyJSON))
@@ -332,9 +344,9 @@ func postNewMessage(t *testing.T, baseURL, queue, bodyJSON, idemKey string) (msg
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// если явно дали idemKey — используем, иначе пусть auto-idem сгенерит
-	if strings.TrimSpace(idemKey) != "" {
-		req.Header.Set("Idempotency-Key", idemKey)
+	// если явно дали guid — используем, иначе сервер сгенерит
+	if strings.TrimSpace(guid) != "" {
+		req.Header.Set("X-Message-GUID", guid)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -345,14 +357,22 @@ func postNewMessage(t *testing.T, baseURL, queue, bodyJSON, idemKey string) (msg
 
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d; body=%q; headers: X-Message-Id=%q Idempotency-Key=%q",
+		t.Fatalf("expected 202, got %d; body=%q; X-Message-GUID=%q",
 			resp.StatusCode, string(b),
-			resp.Header.Get("X-Message-Id"),
-			resp.Header.Get("Idempotency-Key"),
+			resp.Header.Get("X-Message-GUID"),
 		)
 	}
 
-	return resp.Header.Get("X-Message-Id"), resp.Header.Get("Idempotency-Key")
+	var ar apiResp
+	if err := json.Unmarshal(b, &ar); err == nil && ar.Data != nil {
+		var data struct {
+			MessageGUID string `json:"message_guid"`
+		}
+		if json.Unmarshal(ar.Data, &data) == nil && data.MessageGUID != "" {
+			return data.MessageGUID
+		}
+	}
+	return resp.Header.Get("X-Message-GUID")
 }
 
 // --- Tests ---
@@ -378,7 +398,7 @@ func TestE2E_HTTP_HappyPath(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{}, "", false, "")
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -416,16 +436,16 @@ func TestE2E_HTTP_HappyPath(t *testing.T) {
 	idem := mustUUIDv7String(t)
 	payload := []byte(`{"text":"hello"}`)
 
-	status, msgID, bodyStr, hdr := doPostNewMessage(t, srv.URL, queueName, payload, idem)
+	status, msgGUID, bodyStr, hdr := doPostNewMessage(t, srv.URL, queueName, payload, idem)
 	if status != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d; body=%q; headers: X-Message-Id=%q Idempotency-Key=%q",
-			status, bodyStr, hdr.Get("X-Message-Id"), hdr.Get("Idempotency-Key"))
+		t.Fatalf("expected 202, got %d; body=%q; X-Message-GUID=%q",
+			status, bodyStr, hdr.Get("X-Message-GUID"))
 	}
-	if msgID == "" {
-		t.Fatalf("missing X-Message-Id; body=%q", bodyStr)
+	if msgGUID == "" {
+		t.Fatalf("missing X-Message-GUID; body=%q", bodyStr)
 	}
 
-	stFinal, res := waitTerminalStatus(t, st, msgID, 2*time.Second)
+	stFinal, res := waitTerminalStatus(t, st, msgGUID, 2*time.Second)
 	if stFinal != storage.StatusSucceeded {
 		t.Fatalf("expected succeeded, got %s (exit=%d err=%q)", stFinal, res.ExitCode, res.Err)
 	}
@@ -434,7 +454,7 @@ func TestE2E_HTTP_HappyPath(t *testing.T) {
 	}
 }
 
-func TestE2E_HTTP_Dedup_IdempotencyKey(t *testing.T) {
+func TestE2E_HTTP_Dedup_MessageGUID(t *testing.T) {
 	dbPath := "test_e2e_http_dedup.db"
 	_ = os.Remove(dbPath)
 
@@ -455,7 +475,7 @@ func TestE2E_HTTP_Dedup_IdempotencyKey(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{}, "", false, "")
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -497,12 +517,12 @@ func TestE2E_HTTP_Dedup_IdempotencyKey(t *testing.T) {
 	code2, msg2, body2, hdr2 := doPostNewMessage(t, srv.URL, queueName, payload, idem)
 
 	if code1 != http.StatusAccepted {
-		t.Fatalf("first request: expected 202, got %d; body=%q; headers: X-Message-Id=%q Idempotency-Key=%q",
-			code1, body1, hdr1.Get("X-Message-Id"), hdr1.Get("Idempotency-Key"))
+		t.Fatalf("first request: expected 202, got %d; body=%q; X-Message-GUID=%q",
+			code1, body1, hdr1.Get("X-Message-GUID"))
 	}
 	if code2 != http.StatusAccepted {
-		t.Fatalf("second request: expected 202, got %d; body=%q; headers: X-Message-Id=%q Idempotency-Key=%q",
-			code2, body2, hdr2.Get("X-Message-Id"), hdr2.Get("Idempotency-Key"))
+		t.Fatalf("second request: expected 202, got %d; body=%q; X-Message-GUID=%q",
+			code2, body2, hdr2.Get("X-Message-GUID"))
 	}
 
 	if msg1 == "" || msg2 == "" {
@@ -539,7 +559,7 @@ func TestE2E_HTTP_QueueBusy_WhenOverCapacity(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{}, "", false, "")
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -637,7 +657,7 @@ func TestE2E_HTTP_RetryFlow_FailThenSuccess(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{}, "", false, "")
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -681,7 +701,7 @@ func TestE2E_HTTP_RetryFlow_FailThenSuccess(t *testing.T) {
 		t.Fatalf("expected 202, got %d; body=%q", code, bodyStr)
 	}
 	if msgID == "" {
-		t.Fatalf("missing X-Message-Id; body=%q", bodyStr)
+		t.Fatalf("missing X-Message-GUID; body=%q", bodyStr)
 	}
 
 	stFinal, _ := waitTerminalStatus(t, st, msgID, 3*time.Second)
@@ -703,20 +723,20 @@ func (r *switchRunner) Run(ctx context.Context, cmdArgs []string, script string,
 
 	if n == 1 {
 		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
-			ExitCode:   1,
-			DurationMs: 1,
-			Err:        errors.New("boom"),
+			Queue:       job.Queue,
+			MessageGUID: job.MessageGUID,
+			ExitCode:    1,
+			DurationMs:  1,
+			Err:         errors.New("boom"),
 		}
 	}
 
 	return Result{
-		Queue:      job.Queue,
-		MsgID:      job.MsgID,
-		ExitCode:   0,
-		DurationMs: 1,
-		Err:        nil,
+		Queue:       job.Queue,
+		MessageGUID: job.MessageGUID,
+		ExitCode:    0,
+		DurationMs:  1,
+		Err:         nil,
 	}
 }
 
@@ -740,7 +760,7 @@ func TestE2E_HTTP_RetryLimitExceeded_FinalFailed(t *testing.T) {
 		t.Fatalf("LoadSchemaFromFile: %v", err)
 	}
 
-	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{})
+	mgr := NewManager(zap.NewNop(), filepath.Dir(dbPath), storage.OpenOptions{}, "", false, "")
 
 	queueName := "queue1"
 	cfg := config.QueueConfig{
@@ -784,7 +804,7 @@ func TestE2E_HTTP_RetryLimitExceeded_FinalFailed(t *testing.T) {
 		t.Fatalf("expected 202, got %d; body=%q", code, bodyStr)
 	}
 	if msgID == "" {
-		t.Fatalf("missing X-Message-Id; body=%q", bodyStr)
+		t.Fatalf("missing X-Message-GUID; body=%q", bodyStr)
 	}
 
 	stFinal, res := waitTerminalStatus(t, st, msgID, 5*time.Second)
@@ -806,11 +826,11 @@ type failRunner struct {
 func (r *failRunner) Run(ctx context.Context, cmdArgs []string, script string, job Job) Result {
 	r.calls.Add(1)
 	return Result{
-		Queue:      job.Queue,
-		MsgID:      job.MsgID,
-		ExitCode:   1,
-		DurationMs: 1,
-		Err:        errors.New("always fail"),
+		Queue:       job.Queue,
+		MessageGUID: job.MessageGUID,
+		ExitCode:    1,
+		DurationMs:  1,
+		Err:         errors.New("always fail"),
 	}
 }
 
@@ -820,9 +840,9 @@ func TestE2E_HTTP_GetStatusAndResult_AfterJobDone(t *testing.T) {
 
 	queue := "queue1"
 
-	msgID, idem := postNewMessage(t, ts.URL, queue, `{"text":"hello"}`, "")
-	if msgID == "" || idem == "" {
-		t.Fatalf("expected msgID+idemKey, got msgID=%q idem=%q", msgID, idem)
+	msgID := postNewMessage(t, ts.URL, queue, `{"text":"hello"}`, "")
+	if msgID == "" {
+		t.Fatalf("expected msgID, got empty")
 	}
 
 	st, res := waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID, 2*time.Second)
@@ -830,9 +850,9 @@ func TestE2E_HTTP_GetStatusAndResult_AfterJobDone(t *testing.T) {
 	// GET status
 	{
 		type statusData struct {
-			Queue  string         `json:"queue"`
-			MsgID  string         `json:"msg_id"`
-			Status storage.Status `json:"status"`
+			Queue       string         `json:"queue"`
+			MessageGUID string         `json:"message_guid"`
+			Status      storage.Status `json:"status"`
 		}
 
 		code, bodyB, ar, hdr := httpGetAPIWithHeaders(t, ts.URL+"/"+queue+"/status/"+msgID)
@@ -845,8 +865,8 @@ func TestE2E_HTTP_GetStatusAndResult_AfterJobDone(t *testing.T) {
 
 		got := mustUnmarshalData[statusData](t, ar, bodyB)
 
-		if got.MsgID != msgID {
-			t.Fatalf("status endpoint: expected msg_id=%s, got %s", msgID, got.MsgID)
+		if got.MessageGUID != msgID {
+			t.Fatalf("status endpoint: expected message_guid=%s, got %s", msgID, got.MessageGUID)
 		}
 		if got.Status != st {
 			t.Fatalf("status endpoint: expected status=%s, got %s", st, got.Status)
@@ -856,10 +876,10 @@ func TestE2E_HTTP_GetStatusAndResult_AfterJobDone(t *testing.T) {
 	// GET result
 	{
 		type resultData struct {
-			Queue  string         `json:"queue"`
-			MsgID  string         `json:"msg_id"`
-			Status storage.Status `json:"status"`
-			Result storage.Result `json:"result"`
+			Queue       string         `json:"queue"`
+			MessageGUID string         `json:"message_guid"`
+			Status      storage.Status `json:"status"`
+			Result      storage.Result `json:"result"`
 		}
 
 		code, bodyB, ar, hdr := httpGetAPIWithHeaders(t, ts.URL+"/"+queue+"/result/"+msgID)
@@ -872,8 +892,8 @@ func TestE2E_HTTP_GetStatusAndResult_AfterJobDone(t *testing.T) {
 
 		got := mustUnmarshalData[resultData](t, ar, bodyB)
 
-		if got.MsgID != msgID {
-			t.Fatalf("result endpoint: expected msg_id=%s, got %s", msgID, got.MsgID)
+		if got.MessageGUID != msgID {
+			t.Fatalf("result endpoint: expected message_guid=%s, got %s", msgID, got.MessageGUID)
 		}
 		if got.Status != st {
 			t.Fatalf("result endpoint: expected status=%s, got %s", st, got.Status)
@@ -894,11 +914,11 @@ func TestE2E_HTTP_InfoEndpoints_ReturnStats(t *testing.T) {
 	queue := "queue1"
 
 	// создаём 2 задачи, чтобы avg_duration_ms был осмысленным (и succeeded > 0)
-	msgID1, _ := postNewMessage(t, ts.URL, queue, `{"text":"info-test-1"}`, "")
+	msgID1 := postNewMessage(t, ts.URL, queue, `{"text":"info-test-1"}`, "")
 	if msgID1 == "" {
 		t.Fatalf("expected msgID1")
 	}
-	msgID2, _ := postNewMessage(t, ts.URL, queue, `{"text":"info-test-2"}`, "")
+	msgID2 := postNewMessage(t, ts.URL, queue, `{"text":"info-test-2"}`, "")
 	if msgID2 == "" {
 		t.Fatalf("expected msgID2")
 	}
@@ -1056,8 +1076,8 @@ func TestE2E_HTTP_InfoEndpoints_FromTimeQuery_IsReflected(t *testing.T) {
 	queue := "queue1"
 
 	// создаём пару задач, чтобы было что агрегировать
-	msgID1, _ := postNewMessage(t, ts.URL, queue, `{"text":"from-time-1"}`, "")
-	msgID2, _ := postNewMessage(t, ts.URL, queue, `{"text":"from-time-2"}`, "")
+	msgID1 := postNewMessage(t, ts.URL, queue, `{"text":"from-time-1"}`, "")
+	msgID2 := postNewMessage(t, ts.URL, queue, `{"text":"from-time-2"}`, "")
 	_, _ = waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID1, 2*time.Second)
 	_, _ = waitTerminalStatus(t, mustGetStore(t, qm, "queue1"), msgID2, 2*time.Second)
 

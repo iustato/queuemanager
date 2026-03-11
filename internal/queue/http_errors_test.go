@@ -30,15 +30,15 @@ func TestMapPushErrorToHTTP_ContextTimeout(t *testing.T) {
 	}
 }
 
-func TestMapPushErrorToHTTP_InvalidIdem(t *testing.T) {
-	err := ErrInvalidIdemKey{Msg: "missing Idempotency-Key header"}
+func TestMapPushErrorToHTTP_InvalidMessageGUID(t *testing.T) {
+	err := ErrInvalidMessageGUID{Msg: "invalid X-Message-GUID format"}
 	st, msg, reason := mapPushErrorToHTTP(err)
 
 	if st != http.StatusBadRequest {
 		t.Fatalf("status: want %d got %d", http.StatusBadRequest, st)
 	}
-	if reason != "invalid_idempotency_key" {
-		t.Fatalf("reason: want invalid_idempotency_key got %q", reason)
+	if reason != "invalid_message_guid" {
+		t.Fatalf("reason: want invalid_message_guid got %q", reason)
 	}
 	if msg == "" {
 		t.Fatalf("msg should not be empty")

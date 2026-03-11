@@ -34,7 +34,7 @@ func cmdSleepLong() []string {
 
 func TestExecRunner_Run_NoCommand(t *testing.T) {
 	r := ExecRunner{}
-	job := Job{Queue: "q1", MsgID: "m1", Body: []byte("x")}
+	job := Job{Queue: "q1", MessageGUID: "m1", Body: []byte("x")}
 
 	res := r.Run(context.Background(), nil, "", job)
 
@@ -54,7 +54,7 @@ func TestExecRunner_Run_ExitError_ExitCodeAndStdStreams(t *testing.T) {
 		KillProcessGroup: false,
 	}
 
-	job := Job{Queue: "q1", MsgID: "m2", Body: []byte(`{"x":1}`)}
+	job := Job{Queue: "q1", MessageGUID: "m2", Body: []byte(`{"x":1}`)}
 
 	res := r.Run(context.Background(), cmdStderrFail(), "", job)
 
@@ -78,7 +78,7 @@ func TestExecRunner_Run_ContextDeadlineExceeded_Returns124(t *testing.T) {
 		KillProcessGroup:  false,
 	}
 
-	job := Job{Queue: "q1", MsgID: "m3", Body: []byte("x")}
+	job := Job{Queue: "q1", MessageGUID: "m3", Body: []byte("x")}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

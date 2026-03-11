@@ -53,14 +53,14 @@ func TestRuntime_Integration_Panic_MarksFailedWithPanicRecovered(t *testing.T) {
 
 	msgID := "msg_panic"
 
-	_, _, err = st.PutNewMessage(context.Background(), cfg.Name, msgID, []byte(`{}`), "", 0, 0)
+	_, _, _, err = st.PutNewMessage(context.Background(), cfg.Name, msgID, []byte(`{}`), 0, 0)
 	if err != nil {
 		t.Fatalf("put new message: %v", err)
 	}
 
 	err = rt.Enqueue(context.Background(), Job{
 		Queue:   cfg.Name,
-		MsgID:   msgID,
+		MessageGUID:   msgID,
 		Body:    []byte(`{}`),
 		Attempt: 1,
 		Method:  "POST",

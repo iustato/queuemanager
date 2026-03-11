@@ -27,7 +27,7 @@ func TestRequeueStuck_ShouldMoveExpiredProcessingToEnqueueFailed(t *testing.T) {
 	ctx := context.Background()
 	msgID := "stuck_msg_1"
 
-	_, _, err = store.PutNewMessage(ctx, "queue1", msgID, []byte(`{"text":"x"}`), "idem_stuck_1", 0, 0)
+	_, _, _, err = store.PutNewMessage(ctx, "queue1", msgID, []byte(`{"text":"x"}`), 0, 0)
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestRequeueStuck_ShouldMoveExpiredProcessingToEnqueueFailed(t *testing.T) {
 		t.Fatalf("expected requeued=1, got %d", n)
 	}
 
-	meta, _, err := store.GetByMsgID(msgID)
+	meta, _, err := store.GetByGUID(msgID)
 	if err != nil {
 		t.Fatalf("get meta: %v", err)
 	}

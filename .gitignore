@@ -1,4 +1,5 @@
 # Бинарные файлы и исполняемые файлы Go
+/queue_service
 /server
 /cmd/server/server
 /cmd/load_test/load_test
@@ -29,13 +30,16 @@ node_modules/
 /vendor/
 
 # Личные заметки и шпаргалки
-AUTO_IDEMPOCY.txt
+AUTO_GUID.txt
 BOLT_BD_START.txt
 GIT_LAB.txt
 LOGS_CLEAR.txt
 QUICK_START
 TESTS_START.TXT
 CODE_REVIEW1.md
+
+# Environment config (keep .env.example tracked)
+.env
 
 # Admin panel (Next.js)
 /admin/.next/

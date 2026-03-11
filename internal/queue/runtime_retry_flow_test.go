@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// fake runner: fails first time for a given msg_id, succeeds on second run.
+// fake runner: fails first time for a given message_guid, succeeds on second run.
 type failOnceRunner struct {
 	seen map[string]*int64
 }
@@ -20,11 +20,11 @@ func newFailOnceRunner() *failOnceRunner {
 }
 
 func (r *failOnceRunner) Run(ctx context.Context, cmd []string, scriptPath string, job Job) Result {
-	ptr, ok := r.seen[job.MsgID]
+	ptr, ok := r.seen[job.MessageGUID]
 	if !ok {
 		var x int64
 		ptr = &x
-		r.seen[job.MsgID] = ptr
+		r.seen[job.MessageGUID] = ptr
 	}
 	n := atomic.AddInt64(ptr, 1)
 
@@ -66,12 +66,11 @@ func TestRuntime_RetryFlow_PersistsAndReenqueues(t *testing.T) {
 	}
 
 	msgID := "m1"
-	_, _, _ = ms.PutNewMessage(
+	_, _, _, _ = ms.PutNewMessage(
 		context.Background(),
 		"q1",
 		msgID,
 		[]byte(`{"x":1}`),
-		"idem",
 		time.Now().UnixMilli(),
 		time.Now().Add(time.Hour).UnixMilli(),
 	)
@@ -82,7 +81,7 @@ func TestRuntime_RetryFlow_PersistsAndReenqueues(t *testing.T) {
 	go rt.workerLoop(1, runner)
 
 	// enqueue first attempt
-	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: msgID, Attempt: 1}); err != nil {
+	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: msgID, Attempt: 1}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -98,7 +97,7 @@ func TestRuntime_RetryFlow_PersistsAndReenqueues(t *testing.T) {
 
 		seenAttempt2 := false
 		for _, c := range ms.markProcessingCalls {
-			if c.MsgID == msgID && c.Attempt >= 2 {
+			if c.GUID == msgID && c.Attempt >= 2 {
 				seenAttempt2 = true
 				break
 			}

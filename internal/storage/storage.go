@@ -13,8 +13,8 @@ type OpenOptions struct {
 	FilePath string
 	Timeout  time.Duration
 	NoSync   bool
-    
-    ProcessingTimeoutMs int64
+
+	ProcessingTimeoutMs int64
 	GCProcessingGraceMs int64
 }
 
@@ -31,7 +31,6 @@ func Open(opts OpenOptions) (*Store, error) {
 		return nil, err
 	}
 
-	// дефолты если не заданы
 	if opts.ProcessingTimeoutMs == 0 {
 		opts.ProcessingTimeoutMs = defaultProcessingTimeoutMs
 	}
@@ -57,7 +56,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bMeta, bBody, bIdem, bExp, bProc, bEnqFail} {
+		for _, b := range [][]byte{bMeta, bBody, bExp, bProc, bEnqFail} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -66,161 +65,111 @@ func (s *Store) initBuckets() error {
 	})
 }
 
-// PutNewMessage:
-// - если idemKey уже есть -> возвращает существующий msg_id (created=false)
-// - иначе пишет meta + body
-// - пишет idemKey -> msg_id
-// - пишет exp-index (если expiresAtMs != 0)
+// PutNewMessage stores a new message or detects a duplicate by MessageGUID.
+// If bMeta[guid] already exists → returns (guid, false, nil) — dedup.
 func (s *Store) PutNewMessage(
-    ctx context.Context, // 1. Добавляем контекст
-    queue, msgID string, 
-    body []byte, 
-    idempotencyKey string, 
-    enqueuedAtMs int64, 
-    expiresAtMs int64,
-) (string, bool, error) {
-    // Базовые проверки
-    if msgID == "" {
-        return "", false, fmt.Errorf("msgID is required")
-    }
-    
-    // Проверяем контекст еще до начала транзакции
-    if err := ctx.Err(); err != nil {
-        return "", false, err
-    }
-
-    if enqueuedAtMs == 0 {
-        enqueuedAtMs = time.Now().UnixMilli()
-    }
-
-    meta := Meta{
-        Queue:          queue,
-        MsgID:          msgID,
-        IdempotencyKey: idempotencyKey,
-        EnqueuedAtMs:   enqueuedAtMs,
-        Status:         StatusCreated,
-        Attempt:        0,
-        ExpiresAtMs:    expiresAtMs,
-    }
-
-    metaBytes, err := msgpack.Marshal(meta)
-    if err != nil {
-        return "", false, fmt.Errorf("marshal meta: %w", err)
-    }
-
-    retMsgID := msgID
-    created := true
-
-    // BoltDB не поддерживает нативно контекст в методе Update,
-    // поэтому мы имитируем поддержку через проверку внутри функции.
-    err = s.db.Update(func(tx *bolt.Tx) error {
-        // 2. Периодически проверяем, не вышел ли таймаут
-        if err := ctx.Err(); err != nil {
-            return err // Транзакция откатится автоматически
-        }
-
-        bm := tx.Bucket(bMeta)
-        bb := tx.Bucket(bBody)
-        bi := tx.Bucket(bIdem)
-        be := tx.Bucket(bExp)
-        if bm == nil || bb == nil || bi == nil || be == nil {
-            return ErrBucketMissing
-    }
-
-        // 1) idem
-        if idempotencyKey != "" {
-            if v := bi.Get([]byte(idempotencyKey)); v != nil {
-                retMsgID = string(v)
-                created = false
-                return nil
-            }
-        }
-
-        // 2) защита от коллизий
-        if v := bm.Get([]byte(msgID)); v != nil {
-            return ErrAlreadyExists
-        }
-
-        // 3) meta + body
-        if err := bm.Put([]byte(msgID), metaBytes); err != nil {
-            return fmt.Errorf("put meta: %w", err)
-        }
-        if err := bb.Put([]byte(msgID), body); err != nil {
-            return fmt.Errorf("put body: %w", err)
-        }
-
-        // 4) idemKey -> msg_id
-        if idempotencyKey != "" {
-            if err := bi.Put([]byte(idempotencyKey), []byte(msgID)); err != nil {
-                return fmt.Errorf("put idem: %w", err)
-            }
-        }
-
-        // 5) exp-index
-        if expiresAtMs != 0 {
-            k := makeExpKey(expiresAtMs, msgID)
-            if err := be.Put(k, []byte(msgID)); err != nil {
-                return fmt.Errorf("put exp: %w", err)
-            }
-        }
-
-        return nil
-    })
-
-    if err != nil {
-        return "", false, err
-    }
-    return retMsgID, created, nil
-}
-
-// ResolveIdemKey returns msg_id by idem_key (if exists)
-func (s *Store) ResolveIdemKey(idemKey string) (string, bool, error) {
-	if idemKey == "" {
-		return "", false, nil
+	ctx context.Context,
+	queue, guid string,
+	body []byte,
+	enqueuedAtMs int64,
+	expiresAtMs int64,
+) (string, bool, int64, error) {
+	if guid == "" {
+		return "", false, 0, fmt.Errorf("MessageGUID is required")
 	}
 
-	var msgID string
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bIdem)
-        if b == nil {
-            return ErrBucketMissing
-        }
-		v := b.Get([]byte(idemKey))
-		if v == nil {
+	if err := ctx.Err(); err != nil {
+		return "", false, 0, err
+	}
+
+	if enqueuedAtMs == 0 {
+		enqueuedAtMs = time.Now().UnixMilli()
+	}
+
+	meta := Meta{
+		Queue:        queue,
+		MessageGUID:  guid,
+		EnqueuedAtMs: enqueuedAtMs,
+		Status:       StatusCreated,
+		Attempt:      0,
+		ExpiresAtMs:  expiresAtMs,
+	}
+
+	metaBytes, err := msgpack.Marshal(meta)
+	if err != nil {
+		return "", false, 0, fmt.Errorf("marshal meta: %w", err)
+	}
+
+	created := true
+	resultEnqueuedAtMs := enqueuedAtMs
+
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		bm := tx.Bucket(bMeta)
+		bb := tx.Bucket(bBody)
+		be := tx.Bucket(bExp)
+		if bm == nil || bb == nil || be == nil {
+			return ErrBucketMissing
+		}
+
+		// dedup: if bMeta[guid] already exists → duplicate
+		if v := bm.Get([]byte(guid)); v != nil {
+			created = false
+			var existing Meta
+			if err := msgpack.Unmarshal(v, &existing); err == nil {
+				resultEnqueuedAtMs = existing.EnqueuedAtMs
+			}
 			return nil
 		}
-		msgID = string(v)
+
+		// meta + body
+		if err := bm.Put([]byte(guid), metaBytes); err != nil {
+			return fmt.Errorf("put meta: %w", err)
+		}
+		if err := bb.Put([]byte(guid), body); err != nil {
+			return fmt.Errorf("put body: %w", err)
+		}
+
+		// exp-index
+		if expiresAtMs != 0 {
+			k := makeExpKey(expiresAtMs, guid)
+			if err := be.Put(k, []byte(guid)); err != nil {
+				return fmt.Errorf("put exp: %w", err)
+			}
+		}
+
 		return nil
 	})
+
 	if err != nil {
-		return "", false, err
+		return "", false, 0, err
 	}
-	if msgID == "" {
-		return "", false, nil
-	}
-	return msgID, true, nil
+	return guid, created, resultEnqueuedAtMs, nil
 }
 
-// GetByMsgID returns meta + body
-func (s *Store) GetByMsgID(msgID string) (Meta, []byte, error) {
+// GetByGUID returns meta + body
+func (s *Store) GetByGUID(guid string) (Meta, []byte, error) {
 	var meta Meta
 	var body []byte
 
 	err := s.db.View(func(tx *bolt.Tx) error {
 		bm := tx.Bucket(bMeta)
 		bb := tx.Bucket(bBody)
-        if bm == nil || bb == nil {
-            return ErrBucketMissing
-        }
+		if bm == nil || bb == nil {
+			return ErrBucketMissing
+		}
 
-		v := bm.Get([]byte(msgID))
+		v := bm.Get([]byte(guid))
 		if v == nil {
 			return ErrNotFound
 		}
 		if err := msgpack.Unmarshal(v, &meta); err != nil {
 			return fmt.Errorf("unmarshal meta: %w", err)
 		}
-		b := bb.Get([]byte(msgID))
+		b := bb.Get([]byte(guid))
 		if b != nil {
 			body = append([]byte(nil), b...)
 		}
@@ -230,36 +179,32 @@ func (s *Store) GetByMsgID(msgID string) (Meta, []byte, error) {
 	return meta, body, err
 }
 
-func (s *Store) GetStatusAndResult(msgID string) (Status, Result, error) {
-    var st Status
-    var res Result
+func (s *Store) GetStatusAndResult(guid string) (Status, Result, error) {
+	var st Status
+	var res Result
 
-    err := s.db.View(func(tx *bolt.Tx) error {
-        bm := tx.Bucket(bMeta)
-        if bm == nil {
-            return ErrBucketMissing
-        }
-        v := bm.Get([]byte(msgID))
-        if v == nil {
-            return ErrNotFound
-        }
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bm := tx.Bucket(bMeta)
+		if bm == nil {
+			return ErrBucketMissing
+		}
+		v := bm.Get([]byte(guid))
+		if v == nil {
+			return ErrNotFound
+		}
 
-        var meta Meta
-        if err := msgpack.Unmarshal(v, &meta); err != nil {
-            return fmt.Errorf("unmarshal meta: %w", err)
-        }
+		var meta Meta
+		if err := msgpack.Unmarshal(v, &meta); err != nil {
+			return fmt.Errorf("unmarshal meta: %w", err)
+		}
 
-        st = meta.Status
-        if st == StatusSucceeded || st == StatusFailed {
-            res = meta.Result
-            return nil
-        }
-        return ErrNotReady
-    })
+		st = meta.Status
+		if st == StatusSucceeded || st == StatusFailed {
+			res = meta.Result
+			return nil
+		}
+		return ErrNotReady
+	})
 
-    return st, res, err
+	return st, res, err
 }
-
-
-
-

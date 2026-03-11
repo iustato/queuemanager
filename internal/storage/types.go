@@ -5,33 +5,32 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 )
-// Buckets (NEW MODEL)
+
+// Buckets
 var (
-	bMeta = []byte("meta") // msg_id -> Meta(msgpack)
-	bBody = []byte("body") // msg_id -> raw payload bytes
-	bIdem = []byte("idem") // idem_key -> msg_id
-	bExp  = []byte("exp")  // expKey(8B expiresAtMs + msg_id) -> msg_id
-    bProc = []byte("proc") // procKey(8B leaseUntilMs + msg_id) -> msg_id
-	bEnqFail = []byte("enqfail") // новый индекс для быстрого получения сообщений с неудачной попыткой постановки в очередь: enqFailKey(8B failedAtMs + msg_id) -> msg_id
+	bMeta    = []byte("meta")    // MessageGUID -> Meta(msgpack)
+	bBody    = []byte("body")    // MessageGUID -> raw payload bytes
+	bExp     = []byte("exp")     // expKey(8B expiresAtMs + guid) -> guid
+	bProc    = []byte("proc")    // procKey(8B leaseUntilMs + guid) -> guid
+	bEnqFail = []byte("enqfail") // enqFailKey(8B failedAtMs + guid) -> guid
 )
 
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("message already exists")
-	ErrNotReady = errors.New("result not ready")
+	ErrNotReady      = errors.New("result not ready")
 	ErrBucketMissing = errors.New("storage bucket missing")
 )
 
 type Store struct {
-	db *bolt.DB
+	db                  *bolt.DB
 	processingTimeoutMs int64
-    gcProcessingGraceMs int64
+	gcProcessingGraceMs int64
 }
 
 type Meta struct {
-	Queue          string `msgpack:"Queue" json:"queue"`
-	MsgID          string `msgpack:"MsgID" json:"msg_id"`
-	IdempotencyKey string `msgpack:"IdempotencyKey" json:"idempotency_key"`
+	Queue       string `msgpack:"Queue" json:"queue"`
+	MessageGUID string `msgpack:"MessageGUID" json:"message_guid"`
 
 	EnqueuedAtMs int64  `msgpack:"EnqueuedAtMs" json:"enqueued_at_ms"`
 	Status       Status `msgpack:"Status" json:"status"`
@@ -71,9 +70,9 @@ type RequeueReason string
 
 const (
 	RequeueNone         RequeueReason = ""
-	RequeueLeaseExpired RequeueReason = "lease_expired" // зависла в processing и lease истёк
-	RequeueRetry        RequeueReason = "retry"         // retry после ошибки/таймаута
+	RequeueLeaseExpired RequeueReason = "lease_expired"
+	RequeueRetry        RequeueReason = "retry"
+
 	defaultProcessingTimeoutMs int64 = 120_000
 	defaultGCProcessingGraceMs int64 = 120_000
 )
-

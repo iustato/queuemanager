@@ -13,7 +13,7 @@ import (
 )
 
 func TestHandleNewMessage_Rejected_BodyTooLarge(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	// Чтобы limit был маленький: создаём runtime с MaxSize=2
 	m.queues["q1"] = &Runtime{
@@ -37,7 +37,7 @@ func TestHandleNewMessage_Rejected_BodyTooLarge(t *testing.T) {
 }
 
 func TestHandleNewMessage_Rejected_ByPushError(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	// GET почти наверняка будет отвергнут Push-валидацией (а readLimitedBody пройдёт)
 	req := httptest.NewRequest(http.MethodGet, "http://x?x=1", strings.NewReader("ok"))

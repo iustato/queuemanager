@@ -26,25 +26,25 @@ type Manager struct {
 	storageOpts storage.OpenOptions
 
 	workerToken   string
-	allowAutoIdem bool
+	allowAutoGUID bool
+	phpCgiBin     string
 	service       *QueueService
 }
 
-func NewManager(logger *zap.Logger, storageDir string, opts storage.OpenOptions) *Manager {
+func NewManager(logger *zap.Logger, storageDir string, opts storage.OpenOptions, workerToken string, allowAutoGUID bool, phpCgiBin string) *Manager {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 
 	m := &Manager{
-		queues:      make(map[string]*Runtime),
-		log:         logger.Named("queue"),
-		storageDir:  storageDir,
-		storageOpts: opts,
+		queues:        make(map[string]*Runtime),
+		log:           logger.Named("queue"),
+		storageDir:    storageDir,
+		storageOpts:   opts,
+		workerToken:   workerToken,
+		allowAutoGUID: allowAutoGUID,
+		phpCgiBin:     phpCgiBin,
 	}
-
-	// читаем env один раз
-	m.workerToken = os.Getenv("WORKER_TOKEN")
-	m.allowAutoIdem = os.Getenv("ALLOW_AUTO_IDEMPOTENCY") == "true"
 
 	// сервис тоже лучше инициализировать тут
 	m.service = NewQueueService(m)
@@ -106,6 +106,7 @@ func (m *Manager) AddQueue(cfg config.QueueConfig, schema *validate.CompiledSche
 		scriptPath,
 		cfg.FPMNetwork,
 		cfg.FPMAddress,
+		WithPhpCgiBin(m.phpCgiBin),
 	)
 	if err != nil {
 		_ = st.Close()
@@ -143,7 +144,7 @@ func (m *Manager) ListNames() []string {
 }
 
 // ReplaceQueue stops the old runtime and creates a new one with the given config.
-// The per-queue .db file is preserved — existing messages, idempotency keys and
+// The per-queue .db file is preserved — existing messages and
 // expiration indices carry over to the new runtime.
 func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.CompiledSchema) error {
 	m.mu.Lock()
@@ -189,6 +190,7 @@ func (m *Manager) ReplaceQueue(cfg config.QueueConfig, schema *validate.Compiled
 		scriptPath,
 		cfg.FPMNetwork,
 		cfg.FPMAddress,
+		WithPhpCgiBin(m.phpCgiBin),
 	)
 	if err != nil {
 		_ = st.Close()
@@ -237,7 +239,7 @@ func (m *Manager) SetCommand(queueName string, cmd []string) error {
 	return errors.New("SetCommand is deprecated, use ReplaceQueue")
 }
 
-func (m *Manager) Enqueue(ctx context.Context, queueName, msgID string, body []byte) error {
+func (m *Manager) Enqueue(ctx context.Context, queueName, guid string, body []byte) error {
 	m.mu.RLock()
 	rt, ok := m.queues[queueName]
 	m.mu.RUnlock()
@@ -247,11 +249,11 @@ func (m *Manager) Enqueue(ctx context.Context, queueName, msgID string, body []b
 	}
 
 	job := Job{
-		Queue:      queueName,
-		MsgID:      msgID,
-		Body:       body,
-		EnqueuedAt: time.Now(),
-		Attempt:    1,
+		Queue:       queueName,
+		MessageGUID: guid,
+		Body:        body,
+		EnqueuedAt:  time.Now(),
+		Attempt:     1,
 	}
 
 	return rt.Enqueue(ctx, job)

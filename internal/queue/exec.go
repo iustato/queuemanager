@@ -20,8 +20,8 @@ func (r ExecRunner) Run(ctx context.Context, cmdArgs []string, _ string, job Job
 
 	makeResult := func(exitCode int, err error, out, serr []byte) Result {
 		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
+			Queue:       job.Queue,
+			MessageGUID: job.MessageGUID,
 			ExitCode:   exitCode,
 			Stdout:     out,
 			Stderr:     serr,

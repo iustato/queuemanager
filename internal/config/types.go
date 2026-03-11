@@ -19,9 +19,7 @@ type QueueConfig struct {
 	FPMServerName    string `yaml:"fpm_server_name" json:"fpm_server_name,omitempty"`
 	FPMServerPort    string `yaml:"fpm_server_port" json:"fpm_server_port,omitempty"`
 
-	// --- new ---
-	Idempotency IdempotencyConfig `yaml:"idempotency" json:"idempotency,omitempty"`
-	Storage     StorageConfig     `yaml:"storage" json:"storage,omitempty"`
+	Storage StorageConfig `yaml:"storage" json:"storage,omitempty"`
 
 	MaxRetries   int `yaml:"max_retries" json:"max_retries,omitempty"`
 	RetryDelayMs int `yaml:"retry_delay_ms" json:"retry_delay_ms,omitempty"`
@@ -42,15 +40,12 @@ type QueueConfig struct {
 	MaxStderrBytes   int  `yaml:"max_stderr_bytes" json:"max_stderr_bytes,omitempty"`
 	MaxResponseBytes int  `yaml:"max_response_bytes" json:"max_response_bytes,omitempty"`
 	TruncateOnLimit  *bool `yaml:"truncate_on_limit" json:"truncate_on_limit,omitempty"`
+	AllowAutoGUID    *bool `yaml:"allow_auto_guid" json:"allow_auto_guid,omitempty"`
 
 	// maintenance
 	RequeueStuckIntervalSec int `yaml:"requeue_stuck_interval_sec" json:"requeue_stuck_interval_sec,omitempty"`
 	RequeueStuckBatchLimit  int `yaml:"requeue_stuck_batch_limit" json:"requeue_stuck_batch_limit,omitempty"`
 	GCBatchLimit            int `yaml:"gc_batch_limit" json:"gc_batch_limit,omitempty"`
-}
-type IdempotencyConfig struct {
-	AcceptMaxAge string `yaml:"accept_max_age" json:"accept_max_age,omitempty"`
-	RetentionMin string `yaml:"retention_min" json:"retention_min,omitempty"`
 }
 
 type StorageConfig struct {

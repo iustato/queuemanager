@@ -10,12 +10,12 @@ import (
 
 func TestPooledFastCGIRunner_MakeResult_And_MakeResultOut(t *testing.T) {
 	r := &PooledFastCGIRunner{}
-	job := Job{Queue: "q1", MsgID: "m1"}
+	job := Job{Queue: "q1", MessageGUID: "m1"}
 
 	start := time.Now().Add(-10 * time.Millisecond)
 
 	res := r.makeResult(job, start, 1, 500, context.Canceled)
-	if res.Queue != "q1" || res.MsgID != "m1" {
+	if res.Queue != "q1" || res.MessageGUID != "m1" {
 		t.Fatalf("unexpected ids: %#v", res)
 	}
 	if res.ExitCode != 1 || res.HTTPStatus != 500 {
@@ -118,7 +118,7 @@ func TestPooledFastCGIRunner_Run_Busy(t *testing.T) {
 	}
 	r.busy.Store(true)
 
-	res := r.Run(context.Background(), nil, "job.php", Job{Queue: "q", MsgID: "m"})
+	res := r.Run(context.Background(), nil, "job.php", Job{Queue: "q", MessageGUID: "m"})
 	if res.Err != ErrRunnerBusy {
 		t.Fatalf("expected ErrRunnerBusy, got: %v", res.Err)
 	}
@@ -132,7 +132,7 @@ func TestPooledFastCGIRunner_Run_NoScript(t *testing.T) {
 		Network: "tcp",
 		Address: "127.0.0.1:1",
 	}
-	res := r.Run(context.Background(), nil, "   ", Job{Queue: "q", MsgID: "m"})
+	res := r.Run(context.Background(), nil, "   ", Job{Queue: "q", MessageGUID: "m"})
 	if res.ExitCode != 1 || res.Err == nil {
 		t.Fatalf("expected exitCode=1 and err, got: %#v", res)
 	}
@@ -140,7 +140,7 @@ func TestPooledFastCGIRunner_Run_NoScript(t *testing.T) {
 
 func TestPooledFastCGIRunner_Run_NoNetworkOrAddress(t *testing.T) {
 	r := &PooledFastCGIRunner{}
-	res := r.Run(context.Background(), nil, "job.php", Job{Queue: "q", MsgID: "m"})
+	res := r.Run(context.Background(), nil, "job.php", Job{Queue: "q", MessageGUID: "m"})
 	if res.ExitCode != 1 || res.Err == nil {
 		t.Fatalf("expected exitCode=1 and err, got: %#v", res)
 	}
@@ -154,7 +154,7 @@ func TestPooledFastCGIRunner_Run_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	res := r.Run(ctx, nil, "job.php", Job{Queue: "q", MsgID: "m"})
+	res := r.Run(ctx, nil, "job.php", Job{Queue: "q", MessageGUID: "m"})
 	if res.ExitCode != 1 || res.Err == nil {
 		t.Fatalf("expected exitCode=1 and err, got: %#v", res)
 	}

@@ -33,7 +33,6 @@ func TestGC_DeletesNonProcessingMessage_AndCleansIndexes(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"gc-delete"}`)
 
 	nowMs := time.Now().UnixMilli()
@@ -41,7 +40,7 @@ func TestGC_DeletesNonProcessingMessage_AndCleansIndexes(t *testing.T) {
 	// expires in the past -> eligible for GC
 	expiredAt := nowMs - 1
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, nowMs, expiredAt)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, nowMs, expiredAt)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -53,14 +52,6 @@ func TestGC_DeletesNonProcessingMessage_AndCleansIndexes(t *testing.T) {
 	if !bucketHasKey(t, st.db, bExp, makeExpKey(expiredAt, msgID)) {
 		t.Fatalf("expected exp key to exist before GC")
 	}
-	// sanity: idem index exists
-	got, ok, err := st.ResolveIdemKey(idem)
-	if err != nil {
-		t.Fatalf("ResolveIdemKey: %v", err)
-	}
-	if !ok || got != msgID {
-		t.Fatalf("expected idem -> msgID mapping before GC")
-	}
 
 	deleted, err := st.GC(nowMs, 10)
 	if err != nil {
@@ -71,7 +62,7 @@ func TestGC_DeletesNonProcessingMessage_AndCleansIndexes(t *testing.T) {
 	}
 
 	// meta/body removed
-	_, _, err = st.GetByMsgID(msgID)
+	_, _, err = st.GetByGUID(msgID)
 	if err == nil {
 		t.Fatalf("expected ErrNotFound after GC")
 	}
@@ -79,15 +70,6 @@ func TestGC_DeletesNonProcessingMessage_AndCleansIndexes(t *testing.T) {
 	// exp index removed
 	if bucketHasKey(t, st.db, bExp, makeExpKey(expiredAt, msgID)) {
 		t.Fatalf("expected exp key removed after GC")
-	}
-
-	// idem index removed
-	_, ok, err = st.ResolveIdemKey(idem)
-	if err != nil {
-		t.Fatalf("ResolveIdemKey after GC: %v", err)
-	}
-	if ok {
-		t.Fatalf("expected idem mapping removed after GC")
 	}
 }
 
@@ -100,10 +82,9 @@ func TestRequeueStuck_DoesNotRequeueIfLeaseNotExpired(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"lease-ok"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -217,7 +198,7 @@ func TestRequeueStuck_CleansInvalidProcKeys_AndLeaseMismatch(t *testing.T) {
 		}
 
 		meta := Meta{
-			MsgID:        msgID,
+			MessageGUID:  msgID,
 			Queue:        "q1",
 			Status:       StatusProcessing,
 			LeaseUntilMs: metaLease, // mismatch vs leaseKey

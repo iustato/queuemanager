@@ -66,10 +66,9 @@ func TestMarkEnqueueFailed_Indexed_ThenRemovedByMarkQueued(t *testing.T) {
 
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"hello"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), time.Now().Add(time.Hour).UnixMilli())
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), time.Now().Add(time.Hour).UnixMilli())
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -100,26 +99,24 @@ func TestPutNewMessage_Dedup(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	body := []byte(`{"text":"hello"}`)
-	idem := newUUIDv7ForTest(t)
+	guid := newUUIDv7ForTest(t)
 
-	msg1 := newUUIDv7ForTest(t)
-	ret1, created1, err := st.PutNewMessage(ctx, queue, msg1, body, idem, time.Now().UnixMilli(), 0)
+	ret1, created1, _, err := st.PutNewMessage(ctx, queue, guid, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage #1: %v", err)
 	}
-	if !created1 || ret1 != msg1 {
-		t.Fatalf("expected created1=true ret1=msg1")
+	if !created1 || ret1 != guid {
+		t.Fatalf("expected created1=true ret1=guid")
 	}
 
-	msg2 := newUUIDv7ForTest(t)
-	ret2, created2, err := st.PutNewMessage(ctx, queue, msg2, body, idem, time.Now().UnixMilli(), 0)
+	ret2, created2, _, err := st.PutNewMessage(ctx, queue, guid, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage #2: %v", err)
 	}
 	if created2 {
 		t.Fatalf("expected created2=false (dedup)")
 	}
-	if ret2 != msg1 {
-		t.Fatalf("expected dedup to return first msgID, got %s", ret2)
+	if ret2 != guid {
+		t.Fatalf("expected dedup to return same guid, got %s", ret2)
 	}
 }

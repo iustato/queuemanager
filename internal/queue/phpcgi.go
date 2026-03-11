@@ -14,6 +14,9 @@ import (
 
 // PHPCGIRunner запускает php-cgi как CGI (с правильным окружением) и отрезает CGI-заголовки.
 type PHPCGIRunner struct {
+	// Path to php-cgi binary (default: "php-cgi").
+	PhpCgiBin string
+
 	// Ограничения вывода (anti-OOM). 0 => drop all output.
 	MaxStdoutBytes int
 	MaxStderrBytes int
@@ -27,8 +30,8 @@ func (r PHPCGIRunner) Run(ctx context.Context, _ []string, script string, job Jo
 
 	makeResult := func(exitCode int, err error, out, serr []byte) Result {
 		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
+			Queue:       job.Queue,
+			MessageGUID: job.MessageGUID,
 			ExitCode:   exitCode,
 			Stdout:     out,
 			Stderr:     serr,
@@ -57,7 +60,11 @@ func (r PHPCGIRunner) Run(ctx context.Context, _ []string, script string, job Jo
 	}
 
 	// Prepare process
-	cmd := exec.CommandContext(ctx, "php-cgi")
+	bin := r.PhpCgiBin
+	if bin == "" {
+		bin = "php-cgi"
+	}
+	cmd := exec.CommandContext(ctx, bin)
 	cmd.Stdin = bytes.NewReader(job.Body)
 
 	// Kill process tree on unix (stubs on !unix)

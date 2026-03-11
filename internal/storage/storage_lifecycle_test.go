@@ -74,13 +74,12 @@ func TestGC_ProcessingMessage_IsNotDeleted_AndExpIsPushed(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"gc-proc"}`)
 
 	nowMs := time.Now().UnixMilli()
 	oldExp := nowMs - 1
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, nowMs, oldExp)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, nowMs, oldExp)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -101,9 +100,9 @@ func TestGC_ProcessingMessage_IsNotDeleted_AndExpIsPushed(t *testing.T) {
 	}
 
 	// meta/body still exist
-	meta, gotBody, err := st.GetByMsgID(msgID)
+	meta, gotBody, err := st.GetByGUID(msgID)
 	if err != nil {
-		t.Fatalf("GetByMsgID: %v", err)
+		t.Fatalf("GetByGUID: %v", err)
 	}
 	if meta.Status != StatusProcessing {
 		t.Fatalf("status: got %v want %v", meta.Status, StatusProcessing)
@@ -134,10 +133,9 @@ func TestTouchProcessing_UpdatesLeaseAndMovesProcIndex(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"touch"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -189,10 +187,9 @@ func TestMarkProcessing_AlreadyLocked(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"lock"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -227,14 +224,13 @@ func TestMarkDone_UpdatesExpIndex_AndRemovesProcIndex(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"done"}`)
 
 	now := time.Now().UnixMilli()
 	oldExp := now + 1_000
 	newExp := now + 9_999
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, now, oldExp)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, now, oldExp)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -299,47 +295,42 @@ func TestPutNewMessage_Dedup_DoesNotOverwriteBodyOrMeta(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	idem := newUUIDv7ForTest(t)
 
-	msg1 := newUUIDv7ForTest(t)
+	guid := newUUIDv7ForTest(t)
 	queue1 := "q1"
 	body1 := []byte(`{"text":"first"}`)
 
-	ret1, created1, err := st.PutNewMessage(ctx, queue1, msg1, body1, idem, time.Now().UnixMilli(), 0)
+	ret1, created1, _, err := st.PutNewMessage(ctx, queue1, guid, body1, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage #1: %v", err)
 	}
-	if !created1 || ret1 != msg1 {
-		t.Fatalf("expected created1=true ret1=msg1")
+	if !created1 || ret1 != guid {
+		t.Fatalf("expected created1=true ret1=guid")
 	}
 
-	msg2 := newUUIDv7ForTest(t)
 	queue2 := "q2"
 	body2 := []byte(`{"text":"second"}`)
 
-	ret2, created2, err := st.PutNewMessage(ctx, queue2, msg2, body2, idem, time.Now().UnixMilli(), 0)
+	ret2, created2, _, err := st.PutNewMessage(ctx, queue2, guid, body2, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage #2: %v", err)
 	}
 	if created2 {
 		t.Fatalf("expected created2=false (dedup)")
 	}
-	if ret2 != msg1 {
-		t.Fatalf("expected dedup to return msg1, got %s", ret2)
+	if ret2 != guid {
+		t.Fatalf("expected dedup to return guid, got %s", ret2)
 	}
 
-	meta, gotBody, err := st.GetByMsgID(msg1)
+	meta, gotBody, err := st.GetByGUID(guid)
 	if err != nil {
-		t.Fatalf("GetByMsgID(msg1): %v", err)
+		t.Fatalf("GetByGUID(guid): %v", err)
 	}
-	if meta.MsgID != msg1 {
-		t.Fatalf("meta.MsgID overwritten: got %s want %s", meta.MsgID, msg1)
+	if meta.MessageGUID != guid {
+		t.Fatalf("meta.MessageGUID overwritten: got %s want %s", meta.MessageGUID, guid)
 	}
 	if meta.Queue != queue1 {
 		t.Fatalf("meta.Queue overwritten: got %q want %q", meta.Queue, queue1)
-	}
-	if meta.IdempotencyKey != idem {
-		t.Fatalf("meta.IdempotencyKey overwritten: got %q want %q", meta.IdempotencyKey, idem)
 	}
 	if !bytes.Equal(gotBody, body1) {
 		t.Fatalf("body overwritten: got %s want %s", string(gotBody), string(body1))

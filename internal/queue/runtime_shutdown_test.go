@@ -31,10 +31,10 @@ func TestRuntime_Stop_Graceful_DrainsJobs(t *testing.T) {
 	}()
 
 	// Кладём 2 задачи
-	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: "m1", Attempt: 1}); err != nil {
+	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: "m1", Attempt: 1}); err != nil {
 		t.Fatalf("enqueue1: %v", err)
 	}
-	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: "m2", Attempt: 1}); err != nil {
+	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: "m2", Attempt: 1}); err != nil {
 		t.Fatalf("enqueue2: %v", err)
 	}
 
@@ -68,7 +68,7 @@ func TestRuntime_Enqueue_AfterStop_ReturnsQueueStopped(t *testing.T) {
 
 	rt.Stop()
 
-	err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: "m1", Attempt: 1})
+	err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: "m1", Attempt: 1})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}

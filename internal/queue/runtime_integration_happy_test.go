@@ -53,7 +53,7 @@ func TestRuntime_Integration_HappyPath_MarksSucceeded(t *testing.T) {
 
 	msgID := "msg_1"
 
-	_, created, err := st.PutNewMessage(context.Background(), cfg.Name, msgID, []byte(`{"x":1}`), "", 0, 0)
+	_, created, _, err := st.PutNewMessage(context.Background(), cfg.Name, msgID, []byte(`{"x":1}`), 0, 0)
 	if err != nil {
 		t.Fatalf("put new message: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestRuntime_Integration_HappyPath_MarksSucceeded(t *testing.T) {
 	// Enqueue should succeed.
 	err = rt.Enqueue(context.Background(), Job{
 		Queue:   cfg.Name,
-		MsgID:   msgID,
+		MessageGUID:   msgID,
 		Body:    []byte(`{"x":1}`),
 		Attempt: 1,
 		Method:  "POST",

@@ -25,7 +25,7 @@ import (
 func setupReportDoneManager(t *testing.T) (*Manager, string) {
 	t.Helper()
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 	cfg := config.QueueConfig{
 		Name:    "q1",
 		Workers: 0,
@@ -118,7 +118,7 @@ func TestHandleReportDone_Success_MarksDone(t *testing.T) {
 	if !ok {
 		t.Fatal("queue not found")
 	}
-	_, _, err := rt.Store.PutNewMessage(
+	_, _, _, err := rt.Store.PutNewMessage(
 		t.Context(),
 		q, "msg1", []byte(`{}`), "", time.Now().UnixMilli(), 0,
 	)
@@ -144,7 +144,7 @@ func TestHandleReportDone_Success_MarksDone(t *testing.T) {
 func TestHandleReportDone_ExitCodeNonZero_StatusFailed(t *testing.T) {
 	m, q := setupReportDoneManager(t)
 	rt, _ := m.Get(q)
-	_, _, _ = rt.Store.PutNewMessage(
+	_, _, _, _ = rt.Store.PutNewMessage(
 		t.Context(),
 		q, "msg2", []byte(`{}`), "", time.Now().UnixMilli(), 0,
 	)
@@ -167,8 +167,7 @@ func TestHandleReportDone_ExitCodeNonZero_StatusFailed(t *testing.T) {
 
 func TestHandleReportDone_WorkerToken_Unauthorized(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("WORKER_TOKEN", "secret123")
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "secret123", false, "")
 	cfg := config.QueueConfig{
 		Name:    "q1",
 		Workers: 0,
@@ -195,7 +194,7 @@ func TestHandleReportDone_WorkerToken_Unauthorized(t *testing.T) {
 
 	// correct token via X-Worker-Token
 	rt, _ := m.Get("q1")
-	_, _, _ = rt.Store.PutNewMessage(
+	_, _, _, _ = rt.Store.PutNewMessage(
 		t.Context(),
 		"q1", "msg1", []byte(`{}`), "", time.Now().UnixMilli(), 0,
 	)
@@ -211,8 +210,7 @@ func TestHandleReportDone_WorkerToken_Unauthorized(t *testing.T) {
 
 func TestHandleReportDone_BearerToken_Authorized(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("WORKER_TOKEN", "tok456")
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "tok456", false, "")
 	cfg := config.QueueConfig{
 		Name:    "q1",
 		Workers: 0,
@@ -222,7 +220,7 @@ func TestHandleReportDone_BearerToken_Authorized(t *testing.T) {
 	_ = m.AddQueue(cfg, nil)
 
 	rt, _ := m.Get("q1")
-	_, _, _ = rt.Store.PutNewMessage(
+	_, _, _, _ = rt.Store.PutNewMessage(
 		t.Context(),
 		"q1", "msg1", []byte(`{}`), "", time.Now().UnixMilli(), 0,
 	)
@@ -243,7 +241,7 @@ func TestHandleReportDone_BearerToken_Authorized(t *testing.T) {
 func TestAppendStdStreams_WritesLogFile(t *testing.T) {
 	logDir := t.TempDir()
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 	cfg := config.QueueConfig{
 		Name:    "q1",
 		Workers: 0,
@@ -256,7 +254,7 @@ func TestAppendStdStreams_WritesLogFile(t *testing.T) {
 	}
 
 	rt, _ := m.Get("q1")
-	job := Job{Queue: "q1", MsgID: "test-msg", Attempt: 1}
+	job := Job{Queue: "q1", MessageGUID: "test-msg", Attempt: 1}
 	rt.appendStdStreams(job, []byte("hello stdout"), []byte("hello stderr"))
 
 	logPath := filepath.Join(logDir, "q1", "test-msg.log")
@@ -286,7 +284,7 @@ func TestAppendStdStreams_WritesLogFile(t *testing.T) {
 func TestAppendStdStreams_EmptyOutput_NoFile(t *testing.T) {
 	logDir := t.TempDir()
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 	cfg := config.QueueConfig{
 		Name:    "q1",
 		Workers: 0,
@@ -297,7 +295,7 @@ func TestAppendStdStreams_EmptyOutput_NoFile(t *testing.T) {
 	_ = m.AddQueue(cfg, nil)
 
 	rt, _ := m.Get("q1")
-	job := Job{Queue: "q1", MsgID: "empty-msg", Attempt: 1}
+	job := Job{Queue: "q1", MessageGUID: "empty-msg", Attempt: 1}
 	rt.appendStdStreams(job, nil, nil)
 
 	logPath := filepath.Join(logDir, "q1", "empty-msg.log")
@@ -309,7 +307,7 @@ func TestAppendStdStreams_EmptyOutput_NoFile(t *testing.T) {
 func TestAppendStdStreams_AppendsMultipleAttempts(t *testing.T) {
 	logDir := t.TempDir()
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 	cfg := config.QueueConfig{
 		Name:    "q1",
 		Workers: 0,
@@ -320,10 +318,10 @@ func TestAppendStdStreams_AppendsMultipleAttempts(t *testing.T) {
 	_ = m.AddQueue(cfg, nil)
 
 	rt, _ := m.Get("q1")
-	job1 := Job{Queue: "q1", MsgID: "multi-msg", Attempt: 1}
+	job1 := Job{Queue: "q1", MessageGUID: "multi-msg", Attempt: 1}
 	rt.appendStdStreams(job1, []byte("attempt1"), nil)
 
-	job2 := Job{Queue: "q1", MsgID: "multi-msg", Attempt: 2}
+	job2 := Job{Queue: "q1", MessageGUID: "multi-msg", Attempt: 2}
 	rt.appendStdStreams(job2, []byte("attempt2"), nil)
 
 	logPath := filepath.Join(logDir, "q1", "multi-msg.log")
@@ -346,7 +344,7 @@ func TestAppendStdStreams_AppendsMultipleAttempts(t *testing.T) {
 
 func TestManager_ConcurrentAddDeleteReplace(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 
 	const N = 20
 	var wg sync.WaitGroup
@@ -411,7 +409,7 @@ func TestManager_ConcurrentAddDeleteReplace(t *testing.T) {
 
 func TestManager_ConcurrentAddAndGet(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 
 	const N = 20
 	var wg sync.WaitGroup
@@ -462,7 +460,7 @@ func TestManager_ConcurrentAddAndGet(t *testing.T) {
 
 func TestManager_ConcurrentStopAll(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 
 	for i := 0; i < 5; i++ {
 		cfg := config.QueueConfig{
@@ -510,7 +508,7 @@ func TestMaintenanceLoop_CallsRequeueStuckAndGC(t *testing.T) {
 		RequeueStuckIntervalSec: 1,
 	}
 
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 	// We need to use NewRuntime directly with a mock store
 	rt, err := NewRuntime(
 		cfg,

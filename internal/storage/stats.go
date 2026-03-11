@@ -20,7 +20,7 @@ func (s *Store) GetInfo(queue string, fromTimeMs int64) (QueueInfo, error) {
 		return bm.ForEach(func(k, v []byte) error {
 			var meta Meta
 			if err := msgpack.Unmarshal(v, &meta); err != nil {
-				return fmt.Errorf("getinfo: unmarshal meta msg_id=%s: %w", string(k), err)
+				return fmt.Errorf("getinfo: unmarshal meta guid=%s: %w", string(k), err)
 			}
 
 			if queue != "" && meta.Queue != queue {

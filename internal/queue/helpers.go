@@ -18,7 +18,7 @@ func buildPhpEnvMap(scriptPath string, job Job) map[string]string {
 		"REQUEST_METHOD":    "POST",
 		"CONTENT_TYPE":      "application/json",
 		"CONTENT_LENGTH":    strconv.Itoa(len(job.Body)),
-		"MSG_ID":            job.MsgID,
+		"MESSAGE_GUID":       job.MessageGUID,
 		"QUEUE":             job.Queue,
 		"ATTEMPT":           strconv.Itoa(job.Attempt),
 	}

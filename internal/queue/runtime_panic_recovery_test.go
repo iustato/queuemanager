@@ -15,7 +15,7 @@ type panicOnceRunner struct {
 }
 
 func (r *panicOnceRunner) Run(ctx context.Context, cmd []string, scriptPath string, job Job) Result {
-	if job.MsgID == "panic" && !r.panicked.Swap(true) {
+	if job.MessageGUID == "panic" && !r.panicked.Swap(true) {
 		panic("boom")
 	}
 
@@ -49,8 +49,8 @@ func TestRuntime_Worker_PanicRecovery_ContinuesProcessing(t *testing.T) {
 	exp := time.Now().Add(time.Hour).UnixMilli()
 
 	// seed store so worker can MarkProcessing
-	_, _, _ = ms.PutNewMessage(context.Background(), "q1", "panic", []byte(`{"x":1}`), "idem1", now, exp)
-	_, _, _ = ms.PutNewMessage(context.Background(), "q1", "ok", []byte(`{"x":2}`), "idem2", now, exp)
+	_, _, _, _ = ms.PutNewMessage(context.Background(), "q1", "panic", []byte(`{"x":1}`), now, exp)
+	_, _, _, _ = ms.PutNewMessage(context.Background(), "q1", "ok", []byte(`{"x":2}`), now, exp)
 
 	runner := &panicOnceRunner{}
 
@@ -59,11 +59,11 @@ func TestRuntime_Worker_PanicRecovery_ContinuesProcessing(t *testing.T) {
 	go rt.workerLoop(1, runner)
 
 	// enqueue panic job then normal job
-	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: "panic", Attempt: 1}); err != nil {
+	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: "panic", Attempt: 1}); err != nil {
 		t.Fatalf("enqueue panic: %v", err)
 	}
 
-	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: "ok", Attempt: 1}); err != nil {
+	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: "ok", Attempt: 1}); err != nil {
 		t.Fatalf("enqueue ok: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestRuntime_Worker_PanicRecovery_ContinuesProcessing(t *testing.T) {
 
 		seenOK := false
 		for _, c := range ms.markProcessingCalls {
-			if c.MsgID == "ok" && c.Attempt == 1 {
+			if c.GUID == "ok" && c.Attempt == 1 {
 				seenOK = true
 				break
 			}

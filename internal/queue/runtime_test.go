@@ -12,29 +12,26 @@ import (
 type mockStore struct {
 	mu sync.Mutex
 
-	// msgID -> record
+	// guid -> record
 	msg map[string]mockMsg
-
-	// idempotencyKey -> msgID (dedup barrier)
-	idem map[string]string
 
 	// bookkeeping for asserts
 	markQueuedCalls        []string
 	markEnqueueFailedCalls []struct {
-		MsgID  string
+		GUID   string
 		Reason string
 	}
 	markProcessingCalls []struct {
-		MsgID   string
+		GUID    string
 		Attempt int
 	}
 	touchProcessingCalls []string
 	requeueForRetryCalls []struct {
-		MsgID string
-		TS    int64
+		GUID string
+		TS   int64
 	}
 	markDoneCalls []struct {
-		MsgID  string
+		GUID   string
 		Status storage.Status
 		Res    storage.Result
 		TTL    int64
@@ -68,122 +65,117 @@ type mockMsg struct {
 
 func newMockStore() *mockStore {
 	return &mockStore{
-		msg:  make(map[string]mockMsg),
-		idem: make(map[string]string),
+		msg: make(map[string]mockMsg),
 	}
 }
 
 func (ms *mockStore) PutNewMessage(
 	ctx context.Context,
-	queue, msgID string,
+	queue, guid string,
 	body []byte,
-	idempotencyKey string,
 	enqueuedAtMs int64,
 	expiresAtMs int64,
-) (string, bool, error) {
+) (string, bool, int64, error) {
 	if err := ctx.Err(); err != nil {
-		return "", false, err
+		return "", false, 0, err
 	}
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
 	if ms.failPutNewMessage != nil {
-		return "", false, ms.failPutNewMessage
+		return "", false, 0, ms.failPutNewMessage
 	}
 
-	// Dedup: if idemKey already exists, return existing msgID and created=false
-	if idempotencyKey != "" {
-		if existing, ok := ms.idem[idempotencyKey]; ok {
-			return existing, false, nil
-		}
-		ms.idem[idempotencyKey] = msgID
+	// Dedup: if guid already exists, return created=false
+	if _, ok := ms.msg[guid]; ok {
+		return guid, false, enqueuedAtMs, nil
 	}
 
-	ms.msg[msgID] = mockMsg{
+	ms.msg[guid] = mockMsg{
 		Queue:  queue,
 		Body:   append([]byte(nil), body...),
 		Status: storage.StatusCreated,
 	}
-	return msgID, true, nil
+	return guid, true, enqueuedAtMs, nil
 }
 
-func (ms *mockStore) MarkQueued(msgID string) error {
+func (ms *mockStore) MarkQueued(guid string) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	ms.markQueuedCalls = append(ms.markQueuedCalls, msgID)
+	ms.markQueuedCalls = append(ms.markQueuedCalls, guid)
 	if ms.failMarkQueued != nil {
 		return ms.failMarkQueued
 	}
-	m, ok := ms.msg[msgID]
+	m, ok := ms.msg[guid]
 	if ok {
 		m.Status = storage.StatusQueued
-		ms.msg[msgID] = m
+		ms.msg[guid] = m
 	}
 	return nil
 }
 
-func (ms *mockStore) MarkEnqueueFailed(msgID string, reason string) error {
+func (ms *mockStore) MarkEnqueueFailed(guid string, reason string) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
 	ms.markEnqueueFailedCalls = append(ms.markEnqueueFailedCalls, struct {
-		MsgID  string
+		GUID   string
 		Reason string
-	}{MsgID: msgID, Reason: reason})
+	}{GUID: guid, Reason: reason})
 
 	if ms.failMarkEnqueueFailed != nil {
 		return ms.failMarkEnqueueFailed
 	}
 	// Optional: set status if message exists
-	m, ok := ms.msg[msgID]
+	m, ok := ms.msg[guid]
 	if ok {
 		m.Status = storage.StatusFailed
-		ms.msg[msgID] = m
+		ms.msg[guid] = m
 	}
 	return nil
 }
 
-func (ms *mockStore) MarkProcessing(msgID string, attempt int) error {
+func (ms *mockStore) MarkProcessing(guid string, attempt int) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
 	ms.markProcessingCalls = append(ms.markProcessingCalls, struct {
-		MsgID   string
+		GUID    string
 		Attempt int
-	}{MsgID: msgID, Attempt: attempt})
+	}{GUID: guid, Attempt: attempt})
 
 	if ms.failMarkProcessing != nil {
 		return ms.failMarkProcessing
 	}
-	m, ok := ms.msg[msgID]
+	m, ok := ms.msg[guid]
 	if ok {
 		m.Status = storage.StatusProcessing
-		ms.msg[msgID] = m
+		ms.msg[guid] = m
 	}
 	return nil
 }
 
-func (ms *mockStore) TouchProcessing(msgID string) error {
+func (ms *mockStore) TouchProcessing(guid string) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	ms.touchProcessingCalls = append(ms.touchProcessingCalls, msgID)
+	ms.touchProcessingCalls = append(ms.touchProcessingCalls, guid)
 	if ms.failTouchProcessing != nil {
 		return ms.failTouchProcessing
 	}
 	return nil
 }
 
-func (ms *mockStore) RequeueForRetry(msgID string, ts int64) error {
+func (ms *mockStore) RequeueForRetry(guid string, ts int64) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
 	ms.requeueForRetryCalls = append(ms.requeueForRetryCalls, struct {
-		MsgID string
-		TS    int64
-	}{MsgID: msgID, TS: ts})
+		GUID string
+		TS   int64
+	}{GUID: guid, TS: ts})
 
 	if ms.failRequeueForRetry != nil {
 		return ms.failRequeueForRetry
@@ -191,30 +183,30 @@ func (ms *mockStore) RequeueForRetry(msgID string, ts int64) error {
 	return nil
 }
 
-func (ms *mockStore) MarkDone(msgID string, status storage.Status, res storage.Result, ttl int64) error {
+func (ms *mockStore) MarkDone(guid string, status storage.Status, res storage.Result, ttl int64) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
 	ms.markDoneCalls = append(ms.markDoneCalls, struct {
-		MsgID  string
+		GUID   string
 		Status storage.Status
 		Res    storage.Result
 		TTL    int64
-	}{MsgID: msgID, Status: status, Res: res, TTL: ttl})
+	}{GUID: guid, Status: status, Res: res, TTL: ttl})
 
 	if ms.failMarkDone != nil {
 		return ms.failMarkDone
 	}
-	m, ok := ms.msg[msgID]
+	m, ok := ms.msg[guid]
 	if ok {
 		m.Status = status
 		m.Result = res
-		ms.msg[msgID] = m
+		ms.msg[guid] = m
 	}
 	return nil
 }
 
-func (ms *mockStore) GetStatusAndResult(msgID string) (storage.Status, storage.Result, error) {
+func (ms *mockStore) GetStatusAndResult(guid string) (storage.Status, storage.Result, error) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
@@ -223,7 +215,7 @@ func (ms *mockStore) GetStatusAndResult(msgID string) (storage.Status, storage.R
 		return st, storage.Result{}, ms.failGetStatusAndResult
 	}
 
-	m, ok := ms.msg[msgID]
+	m, ok := ms.msg[guid]
 	if !ok {
 		var st storage.Status
 		return st, storage.Result{}, errors.New("not found")

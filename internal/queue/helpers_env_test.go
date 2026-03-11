@@ -10,7 +10,7 @@ func TestBuildPhpEnvMap_DefaultsAndOverrides(t *testing.T) {
 	scriptPath := filepath.Join("some", "dir", "job.php")
 	job := Job{
 		Queue:   "q1",
-		MsgID:   "m1",
+		MessageGUID:   "m1",
 		Attempt: 3,
 		Body:    []byte(`{"x":1}`),
 
@@ -49,8 +49,8 @@ func TestBuildPhpEnvMap_DefaultsAndOverrides(t *testing.T) {
 	}
 
 	// job fields
-	if env["MSG_ID"] != "m1" {
-		t.Fatalf("MSG_ID: got %q", env["MSG_ID"])
+	if env["MESSAGE_GUID"] != "m1" {
+		t.Fatalf("MESSAGE_GUID: got %q", env["MESSAGE_GUID"])
 	}
 	if env["QUEUE"] != "q1" {
 		t.Fatalf("QUEUE: got %q", env["QUEUE"])
@@ -75,7 +75,7 @@ func TestBuildPhpEnvStandalone_ConvertsToSlice(t *testing.T) {
 	scriptPath := "job.php"
 	job := Job{
 		Queue:   "q1",
-		MsgID:   "m1",
+		MessageGUID:   "m1",
 		Attempt: 1,
 		Body:    []byte("abc"),
 	}
@@ -91,7 +91,7 @@ func TestBuildPhpEnvStandalone_ConvertsToSlice(t *testing.T) {
 	// проверим, что нужные пары точно есть
 	wantContains := []string{
 		"SCRIPT_FILENAME=" + scriptPath,
-		"MSG_ID=m1",
+		"MESSAGE_GUID=m1",
 		"QUEUE=q1",
 		"ATTEMPT=1",
 		"CONTENT_LENGTH=3",

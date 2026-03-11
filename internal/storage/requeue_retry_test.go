@@ -34,7 +34,7 @@ func TestStore_RequeueForRetry_ShouldUpdateMetaAndIndex(t *testing.T) {
 		}
 
 		meta := Meta{
-			MsgID:              msgID,
+			MessageGUID:        msgID,
 			Status:             StatusCreated,
 			EnqueueFailedAtMs:  oldTs,
 			EnqueueError:       "old",
@@ -138,7 +138,7 @@ func TestStore_RequeueForRetry_TsZero_ShouldSetNonZeroTimestamp(t *testing.T) {
 		if bm == nil {
 			return ErrBucketMissing
 		}
-		meta := Meta{MsgID: msgID, Status: StatusCreated}
+		meta := Meta{MessageGUID: msgID, Status: StatusCreated}
 		buf, err := msgpack.Marshal(meta)
 		if err != nil {
 			return err

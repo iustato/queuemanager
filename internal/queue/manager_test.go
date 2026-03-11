@@ -25,7 +25,7 @@ func testRuntimeCmd() string {
 }
 
 func TestManager_NewManager_NonNilFields(t *testing.T) {
-	m := NewManager(nil, t.TempDir(), storage.OpenOptions{})
+	m := NewManager(nil, t.TempDir(), storage.OpenOptions{}, "", false, "")
 	if m == nil {
 		t.Fatalf("expected non-nil manager")
 	}
@@ -38,7 +38,7 @@ func TestManager_NewManager_NonNilFields(t *testing.T) {
 }
 
 func TestManager_AddQueue_Duplicate(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	cfg := config.QueueConfig{
 		Name:    "q1",
@@ -57,7 +57,7 @@ func TestManager_AddQueue_Duplicate(t *testing.T) {
 }
 
 func TestManager_ListNames_Get_DeleteQueue(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	cfg := config.QueueConfig{
 		Name:    "q1",
@@ -89,7 +89,7 @@ func TestManager_ListNames_Get_DeleteQueue(t *testing.T) {
 
 func TestManager_DeleteQueue_RemovesDBFile(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), dir, storage.OpenOptions{}, "", false, "")
 
 	cfg := config.QueueConfig{
 		Name:    "q1",
@@ -114,7 +114,7 @@ func TestManager_DeleteQueue_RemovesDBFile(t *testing.T) {
 }
 
 func TestManager_ReplaceQueue_Replaces(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	cfg1 := config.QueueConfig{
 		Name:    "q1",
@@ -147,7 +147,7 @@ func TestManager_ReplaceQueue_Replaces(t *testing.T) {
 }
 
 func TestManager_SetCommand_Deprecated(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	err := m.SetCommand("q1", []string{"x"})
 	if err == nil {
@@ -156,7 +156,7 @@ func TestManager_SetCommand_Deprecated(t *testing.T) {
 }
 
 func TestManager_Enqueue_UnknownQueue(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	err := m.Enqueue(context.Background(), "missing", "m1", []byte("x"))
 	if err == nil {
@@ -168,7 +168,7 @@ func TestManager_Enqueue_UnknownQueue(t *testing.T) {
 }
 
 func TestManager_StopAll_NoPanic(t *testing.T) {
-	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{})
+	m := NewManager(zap.NewNop(), t.TempDir(), storage.OpenOptions{}, "", false, "")
 
 	// добавим пару очередей
 	for _, q := range []string{"q1", "q2"} {

@@ -25,7 +25,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 			zap.Int("status", http.StatusNotFound),
 			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
 		)
-		http.Error(w, "unknown queue", http.StatusNotFound)
+		writeAPIError(w, r, http.StatusNotFound, "unknown_queue", "unknown queue", nil)
 		return
 	}
 
@@ -47,7 +47,7 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 			zap.String("reason", reason),
 			zap.Error(err),
 		)
-		http.Error(w, msg, st)
+		writeAPIError(w, r, st, reason, msg, nil)
 		return
 	}
 
@@ -59,10 +59,9 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 	defer cancel()
 
 	resp, pushErr := m.service.Push(ctx, PushRequest{
-		Queue:    queueName,
-		Body:     body,
-		IdemKey:  strings.TrimSpace(r.Header.Get(headerIdempotencyKey)),
-		AutoIdem: m.allowAutoIdem,
+		Queue:       queueName,
+		Body:        body,
+		MessageGUID: strings.TrimSpace(r.Header.Get(headerMessageGUID)),
 
 		Method:      r.Method,
 		QueryString: r.URL.RawQuery,
@@ -70,12 +69,9 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		RemoteAddr:  r.RemoteAddr,
 	})
 
-	// 2) Если сервис уже успел вычислить msgID/idemKey — возвращаем их даже при ошибке
-	if resp.MsgID != "" {
-		w.Header().Set("X-Message-Id", resp.MsgID)
-	}
-	if resp.IdemKey != "" {
-		w.Header().Set(headerIdempotencyKey, resp.IdemKey)
+	// 2) Если сервис уже успел вычислить MessageGUID — возвращаем даже при ошибке
+	if resp.MessageGUID != "" {
+		w.Header().Set(headerMessageGUID, resp.MessageGUID)
 	}
 
 	if pushErr != nil {
@@ -87,11 +83,10 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 			zap.Int("status", st),
 			zap.Int64("duration_ms", time.Since(start).Milliseconds()),
 			zap.String("reason", reason),
-			zap.String("msg_id", resp.MsgID),
-			zap.String("idempotency_key", resp.IdemKey),
+			zap.String("message_guid", resp.MessageGUID),
 			zap.Error(pushErr),
 		)
-		http.Error(w, msg, st)
+		writeAPIError(w, r, st, reason, msg, nil)
 		return
 	}
 
@@ -107,15 +102,14 @@ func (m *Manager) HandleNewMessage(queueName string, w http.ResponseWriter, r *h
 		zap.String("cmd", cmdNewMessage),
 		zap.Int("status", st),
 		zap.Int64("duration_ms", time.Since(start).Milliseconds()),
-		zap.String("msg_id", resp.MsgID),
-		zap.String("idempotency_key", resp.IdemKey),
+		zap.String("message_guid", resp.MessageGUID),
 		zap.Bool("created", resp.Created),
 	)
 
-	// 3) Явный Content-Type
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("X-Message-Id", resp.MsgID)
-	w.Header().Set(headerIdempotencyKey, resp.IdemKey)
-	w.WriteHeader(st)
-	_, _ = w.Write([]byte("accepted"))
+	w.Header().Set(headerMessageGUID, resp.MessageGUID)
+	writeAPIOK(w, r, st, map[string]any{
+		"status":       "accepted",
+		"message_guid": resp.MessageGUID,
+		"created_at":   time.UnixMilli(resp.CreatedAtMs).UTC().Format(time.RFC3339),
+	})
 }

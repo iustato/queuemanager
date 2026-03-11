@@ -1,10 +1,11 @@
 package storage
 
 import (
-    "fmt"
-    "time"
+	"fmt"
+	"time"
+
 	msgpack "github.com/vmihailenco/msgpack/v5"
-    bolt "go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 )
 
 func (s *Store) GC(nowMs int64, maxDeletes int) ([]string, error) {
@@ -17,18 +18,16 @@ func (s *Store) GC(nowMs int64, maxDeletes int) ([]string, error) {
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		bm := tx.Bucket(bMeta)
 		bb := tx.Bucket(bBody)
-		bi := tx.Bucket(bIdem)
 		be := tx.Bucket(bExp)
 		bp := tx.Bucket(bProc)
-		bf := tx.Bucket(bEnqFail)
 
-		if bm == nil || bb == nil || bi == nil || be == nil || bp == nil || bf == nil {
+		if bm == nil || bb == nil || be == nil || bp == nil {
 			return ErrBucketMissing
 		}
 
 		c := be.Cursor()
 		for k, _ := c.First(); k != nil; {
-			expAt, msgID, ok := parseExpKey(k)
+			expAt, guid, ok := parseExpKey(k)
 			if !ok {
 				_ = be.Delete(k)
 				k, _ = c.Next()
@@ -41,7 +40,7 @@ func (s *Store) GC(nowMs int64, maxDeletes int) ([]string, error) {
 
 			nextK, _ := c.Next()
 
-			mv := bm.Get([]byte(msgID))
+			mv := bm.Get([]byte(guid))
 			if mv == nil {
 				_ = be.Delete(k)
 				k = nextK
@@ -50,10 +49,10 @@ func (s *Store) GC(nowMs int64, maxDeletes int) ([]string, error) {
 
 			var meta Meta
 			if err := msgpack.Unmarshal(mv, &meta); err != nil {
-				_ = bm.Delete([]byte(msgID))
-				_ = bb.Delete([]byte(msgID))
+				_ = bm.Delete([]byte(guid))
+				_ = bb.Delete([]byte(guid))
 				_ = be.Delete(k)
-				deletedIDs = append(deletedIDs, msgID)
+				deletedIDs = append(deletedIDs, guid)
 				k = nextK
 				continue
 			}
@@ -61,25 +60,19 @@ func (s *Store) GC(nowMs int64, maxDeletes int) ([]string, error) {
 			if meta.Status == StatusProcessing {
 				_ = be.Delete(k)
 				newExp := nowMs + s.gcProcessingGraceMs
-				if err := be.Put(makeExpKey(newExp, msgID), []byte(msgID)); err != nil {
+				if err := be.Put(makeExpKey(newExp, guid), []byte(guid)); err != nil {
 					return err
 				}
 			} else {
-				// чистим proc-индекс при финальном удалении (если известен lease)
 				if meta.LeaseUntilMs > 0 {
-					_ = bp.Delete(makeProcKey(meta.LeaseUntilMs, msgID))
+					_ = bp.Delete(makeProcKey(meta.LeaseUntilMs, guid))
 				}
 
-				_ = bm.Delete([]byte(msgID))
-				_ = bb.Delete([]byte(msgID))
+				_ = bm.Delete([]byte(guid))
+				_ = bb.Delete([]byte(guid))
 				_ = be.Delete(k)
 
-				if meta.IdempotencyKey != "" {
-					if iv := bi.Get([]byte(meta.IdempotencyKey)); iv != nil && string(iv) == msgID {
-						_ = bi.Delete([]byte(meta.IdempotencyKey))
-					}
-				}
-				deletedIDs = append(deletedIDs, msgID)
+				deletedIDs = append(deletedIDs, guid)
 			}
 
 			if maxDeletes > 0 && len(deletedIDs) >= maxDeletes {
@@ -109,7 +102,7 @@ func (s *Store) RequeueStuck(nowMs int64, max int) (requeued int, err error) {
 		c := bp.Cursor()
 
 		for k, _ := c.First(); k != nil; {
-			leaseUntil, msgID, ok := parseProcKey(k)
+			leaseUntil, guid, ok := parseProcKey(k)
 			if !ok {
 				nextK, _ := c.Next()
 				_ = bp.Delete(k)
@@ -123,7 +116,7 @@ func (s *Store) RequeueStuck(nowMs int64, max int) (requeued int, err error) {
 
 			nextK, _ := c.Next()
 
-			mv := bm.Get([]byte(msgID))
+			mv := bm.Get([]byte(guid))
 			if mv == nil {
 				_ = bp.Delete(k)
 				k = nextK
@@ -143,7 +136,6 @@ func (s *Store) RequeueStuck(nowMs int64, max int) (requeued int, err error) {
 				continue
 			}
 
-			// вместо "queued" переводим в enqueue_failed + индекс
 			meta.Status = StatusEnqueueFailed
 			meta.EnqueueFailedAtMs = nowMs
 			meta.EnqueueError = "requeue: lease expired"
@@ -159,15 +151,13 @@ func (s *Store) RequeueStuck(nowMs int64, max int) (requeued int, err error) {
 			if err != nil {
 				return err
 			}
-			if err := bm.Put([]byte(msgID), buf); err != nil {
+			if err := bm.Put([]byte(guid), buf); err != nil {
 				return err
 			}
 
-			// снимаем processing индекс
 			_ = bp.Delete(k)
 
-			// пишем enqueue_failed индекс (oldest-first)
-			if err := be.Put(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, msgID), []byte(msgID)); err != nil {
+			if err := be.Put(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, guid), []byte(guid)); err != nil {
 				return err
 			}
 
@@ -184,7 +174,7 @@ func (s *Store) RequeueStuck(nowMs int64, max int) (requeued int, err error) {
 	return requeued, err
 }
 
-func (s *Store) RequeueForRetry(msgID string, ts int64) error {
+func (s *Store) RequeueForRetry(guid string, ts int64) error {
 	if ts == 0 {
 		ts = time.Now().UnixMilli()
 	}
@@ -196,19 +186,18 @@ func (s *Store) RequeueForRetry(msgID string, ts int64) error {
 			return ErrBucketMissing
 		}
 
-		v := bm.Get([]byte(msgID))
+		v := bm.Get([]byte(guid))
 		if v == nil {
 			return ErrNotFound
 		}
 
 		var meta Meta
 		if err := msgpack.Unmarshal(v, &meta); err != nil {
-			return fmt.Errorf("requeueforretry: unmarshal meta msg_id=%s: %w", msgID, err)
+			return fmt.Errorf("requeueforretry: unmarshal meta guid=%s: %w", guid, err)
 		}
 
-		// если уже есть запись в индексе — удалим старую
 		if meta.EnqueueFailedAtMs > 0 {
-			_ = be.Delete(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, msgID))
+			_ = be.Delete(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, guid))
 		}
 
 		meta.Status = StatusEnqueueFailed
@@ -224,15 +213,15 @@ func (s *Store) RequeueForRetry(msgID string, ts int64) error {
 			return fmt.Errorf("requeueforretry: marshal meta: %w", err)
 		}
 
-		if err := bm.Put([]byte(msgID), buf); err != nil {
+		if err := bm.Put([]byte(guid), buf); err != nil {
 			return fmt.Errorf("requeueforretry: put meta: %w", err)
 		}
 
-		return be.Put(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, msgID), []byte(msgID))
+		return be.Put(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, guid), []byte(guid))
 	})
 }
 
-func (s *Store) MarkQueued(msgID string) error {
+func (s *Store) MarkQueued(guid string) error {
 	nowMs := time.Now().UnixMilli()
 
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -242,25 +231,23 @@ func (s *Store) MarkQueued(msgID string) error {
 			return ErrBucketMissing
 		}
 
-		v := bm.Get([]byte(msgID))
+		v := bm.Get([]byte(guid))
 		if v == nil {
 			return ErrNotFound
 		}
 
 		var meta Meta
 		if err := msgpack.Unmarshal(v, &meta); err != nil {
-			return fmt.Errorf("markqueued: unmarshal meta msg_id=%s: %w", msgID, err)
+			return fmt.Errorf("markqueued: unmarshal meta guid=%s: %w", guid, err)
 		}
 
-		// если уже processing или finished — не трогаем
 		switch meta.Status {
 		case StatusProcessing, StatusSucceeded, StatusFailed:
 			return nil
 		}
 
-		// если было enqueue_failed — убрать из индекса
 		if meta.EnqueueFailedAtMs > 0 {
-			_ = be.Delete(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, msgID))
+			_ = be.Delete(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, guid))
 			meta.EnqueueFailedAtMs = 0
 			meta.EnqueueError = ""
 		}
@@ -273,11 +260,11 @@ func (s *Store) MarkQueued(msgID string) error {
 			return fmt.Errorf("markqueued: marshal meta: %w", err)
 		}
 
-		return bm.Put([]byte(msgID), buf)
+		return bm.Put([]byte(guid), buf)
 	})
 }
 
-func (s *Store) MarkEnqueueFailed(msgID string, reason string) error {
+func (s *Store) MarkEnqueueFailed(guid string, reason string) error {
 	nowMs := time.Now().UnixMilli()
 
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -287,20 +274,19 @@ func (s *Store) MarkEnqueueFailed(msgID string, reason string) error {
 			return ErrBucketMissing
 		}
 
-		v := bm.Get([]byte(msgID))
+		v := bm.Get([]byte(guid))
 		if v == nil {
 			return ErrNotFound
 		}
 
 		var meta Meta
 		if err := msgpack.Unmarshal(v, &meta); err != nil {
-			return fmt.Errorf("markenqueuefailed: unmarshal meta msg_id=%s: %w", msgID, err)
+			return fmt.Errorf("markenqueuefailed: unmarshal meta guid=%s: %w", guid, err)
 		}
 
-		// если запись уже была в индексе — удалим старую (чтобы не копить мусор)
 		oldFailAt := meta.EnqueueFailedAtMs
 		if oldFailAt > 0 {
-			_ = be.Delete(makeEnqueueFailedKey(oldFailAt, msgID))
+			_ = be.Delete(makeEnqueueFailedKey(oldFailAt, guid))
 		}
 
 		meta.Status = StatusEnqueueFailed
@@ -312,15 +298,15 @@ func (s *Store) MarkEnqueueFailed(msgID string, reason string) error {
 		if err != nil {
 			return fmt.Errorf("markenqueuefailed: marshal meta: %w", err)
 		}
-		if err := bm.Put([]byte(msgID), buf); err != nil {
+		if err := bm.Put([]byte(guid), buf); err != nil {
 			return fmt.Errorf("markenqueuefailed: put meta: %w", err)
 		}
 
-		return be.Put(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, msgID), []byte(msgID))
+		return be.Put(makeEnqueueFailedKey(meta.EnqueueFailedAtMs, guid), []byte(guid))
 	})
 }
 
-func (s *Store) MarkProcessing(msgID string, attempt int) error {
+func (s *Store) MarkProcessing(guid string, attempt int) error {
 	nowMs := time.Now().UnixMilli()
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bm := tx.Bucket(bMeta)
@@ -329,7 +315,7 @@ func (s *Store) MarkProcessing(msgID string, attempt int) error {
 			return ErrBucketMissing
 		}
 
-		v := bm.Get([]byte(msgID))
+		v := bm.Get([]byte(guid))
 		if v == nil {
 			return ErrNotFound
 		}
@@ -344,7 +330,7 @@ func (s *Store) MarkProcessing(msgID string, attempt int) error {
 		}
 
 		if meta.Status == StatusProcessing && meta.LeaseUntilMs > 0 {
-			_ = bp.Delete(makeProcKey(meta.LeaseUntilMs, msgID))
+			_ = bp.Delete(makeProcKey(meta.LeaseUntilMs, guid))
 		}
 
 		meta.Status = StatusProcessing
@@ -358,14 +344,15 @@ func (s *Store) MarkProcessing(msgID string, attempt int) error {
 		if err != nil {
 			return err
 		}
-		if err := bm.Put([]byte(msgID), buf); err != nil {
+		if err := bm.Put([]byte(guid), buf); err != nil {
 			return err
 		}
 
-		return bp.Put(makeProcKey(meta.LeaseUntilMs, msgID), []byte(msgID))
+		return bp.Put(makeProcKey(meta.LeaseUntilMs, guid), []byte(guid))
 	})
 }
-func (s *Store) TouchProcessing(msgID string) error {
+
+func (s *Store) TouchProcessing(guid string) error {
 	nowMs := time.Now().UnixMilli()
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bm := tx.Bucket(bMeta)
@@ -374,7 +361,7 @@ func (s *Store) TouchProcessing(msgID string) error {
 			return ErrBucketMissing
 		}
 
-		v := bm.Get([]byte(msgID))
+		v := bm.Get([]byte(guid))
 		if v == nil {
 			return ErrNotFound
 		}
@@ -391,7 +378,7 @@ func (s *Store) TouchProcessing(msgID string) error {
 		newLease := nowMs + s.processingTimeoutMs
 
 		if oldLease > 0 {
-			_ = bp.Delete(makeProcKey(oldLease, msgID))
+			_ = bp.Delete(makeProcKey(oldLease, guid))
 		}
 
 		meta.LeaseUntilMs = newLease
@@ -401,15 +388,16 @@ func (s *Store) TouchProcessing(msgID string) error {
 		if err != nil {
 			return err
 		}
-		if err := bm.Put([]byte(msgID), buf); err != nil {
+		if err := bm.Put([]byte(guid), buf); err != nil {
 			return err
 		}
 
-		return bp.Put(makeProcKey(newLease, msgID), []byte(msgID))
+		return bp.Put(makeProcKey(newLease, guid), []byte(guid))
 	})
 }
+
 // MarkDone sets status (succeeded/failed) and optionally updates expiresAtMs (and exp-index)
-func (s *Store) MarkDone(msgID string, status Status, res Result, newExpiresAtMs int64) error {
+func (s *Store) MarkDone(guid string, status Status, res Result, newExpiresAtMs int64) error {
 	if status != StatusSucceeded && status != StatusFailed {
 		return fmt.Errorf("invalid done status: %s", status)
 	}
@@ -425,7 +413,7 @@ func (s *Store) MarkDone(msgID string, status Status, res Result, newExpiresAtMs
 			return ErrBucketMissing
 		}
 
-		v := bm.Get([]byte(msgID))
+		v := bm.Get([]byte(guid))
 		if v == nil {
 			return ErrNotFound
 		}
@@ -436,12 +424,11 @@ func (s *Store) MarkDone(msgID string, status Status, res Result, newExpiresAtMs
 		}
 
 		if bp != nil && meta.Status == StatusProcessing && meta.LeaseUntilMs > 0 {
-			_ = bp.Delete(makeProcKey(meta.LeaseUntilMs, msgID))
+			_ = bp.Delete(makeProcKey(meta.LeaseUntilMs, guid))
 		}
 
 		oldExp := meta.ExpiresAtMs
 		if newExpiresAtMs == -1 {
-			// sentinel: убрать expiration — хранить вечно
 			meta.ExpiresAtMs = 0
 		} else if newExpiresAtMs != 0 {
 			meta.ExpiresAtMs = newExpiresAtMs
@@ -466,15 +453,15 @@ func (s *Store) MarkDone(msgID string, status Status, res Result, newExpiresAtMs
 		if err != nil {
 			return fmt.Errorf("marshal meta: %w", err)
 		}
-		if err := bm.Put([]byte(msgID), buf); err != nil {
+		if err := bm.Put([]byte(guid), buf); err != nil {
 			return fmt.Errorf("put meta: %w", err)
 		}
 
 		if oldExp != 0 && oldExp != meta.ExpiresAtMs {
-			_ = be.Delete(makeExpKey(oldExp, msgID))
+			_ = be.Delete(makeExpKey(oldExp, guid))
 		}
 		if meta.ExpiresAtMs != 0 {
-			if err := be.Put(makeExpKey(meta.ExpiresAtMs, msgID), []byte(msgID)); err != nil {
+			if err := be.Put(makeExpKey(meta.ExpiresAtMs, guid), []byte(guid)); err != nil {
 				return fmt.Errorf("put exp: %w", err)
 			}
 		}

@@ -29,10 +29,9 @@ func TestRequeueStuck_IndexesEnqueueFailed(t *testing.T) {
 
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"hello"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}

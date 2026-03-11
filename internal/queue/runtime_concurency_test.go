@@ -57,7 +57,7 @@ func TestRuntime_Stop_ConcurrentEnqueue_NoPanic(t *testing.T) {
 			for i := 0; i < perG; i++ {
 				err := rt.Enqueue(context.Background(), Job{
 					Queue:   "q1",
-					MsgID:   "m",
+					MessageGUID:   "m",
 					Attempt: 1,
 				})
 				if err == nil {

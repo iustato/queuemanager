@@ -37,10 +37,10 @@ func mapPushErrorToHTTP(err error) (status int, publicMsg string, reason string)
 		return http.StatusInternalServerError, "internal error", "runtime_not_initialized"
 	}
 
-	// idem/json/schema/size
-	var idem ErrInvalidIdemKey
-	if errors.As(err, &idem) {
-		return http.StatusBadRequest, idem.Error(), "invalid_idempotency_key"
+	// guid/json/schema/size
+	var guidErr ErrInvalidMessageGUID
+	if errors.As(err, &guidErr) {
+		return http.StatusBadRequest, guidErr.Error(), "invalid_message_guid"
 	}
 	var ptl ErrPayloadTooLarge
 	if errors.As(err, &ptl) {

@@ -18,7 +18,7 @@ func waitTerminalStatus(t *testing.T, store QueueStore, msgID string, timeout ti
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timeout waiting terminal status for msg_id=%s", msgID)
+	t.Fatalf("timeout waiting terminal status for message_guid=%s", msgID)
 	return "", storage.Result{}
 }
 

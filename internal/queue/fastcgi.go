@@ -36,8 +36,8 @@ type PooledFastCGIRunner struct {
 
 func (r *PooledFastCGIRunner) makeResult(job Job, start time.Time, exitCode int, httpStatus int, err error) Result {
 	return Result{
-		Queue:      job.Queue,
-		MsgID:      job.MsgID,
+		Queue:       job.Queue,
+		MessageGUID: job.MessageGUID,
 		ExitCode:   exitCode,
 		HTTPStatus: httpStatus,
 		Err:        err,

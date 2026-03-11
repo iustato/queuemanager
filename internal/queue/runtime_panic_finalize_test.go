@@ -48,12 +48,11 @@ func TestRuntime_PanicAfterProcessing_MarksFailed(t *testing.T) {
 
 	msgID := "panic-msg"
 
-	_, _, _ = ms.PutNewMessage(
+	_, _, _, _ = ms.PutNewMessage(
 		context.Background(),
 		"q1",
 		msgID,
 		[]byte(`{"x":1}`),
-		"idem",
 		now,
 		exp,
 	)
@@ -65,7 +64,7 @@ func TestRuntime_PanicAfterProcessing_MarksFailed(t *testing.T) {
 
 	if err := rt.Enqueue(context.Background(), Job{
 		Queue:   "q1",
-		MsgID:   msgID,
+		MessageGUID:   msgID,
 		Attempt: 1,
 	}); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -79,7 +78,7 @@ func TestRuntime_PanicAfterProcessing_MarksFailed(t *testing.T) {
 		failed := false
 
 		for _, c := range ms.markDoneCalls {
-			if c.MsgID == msgID {
+			if c.GUID == msgID {
 				failed = true
 				break
 			}

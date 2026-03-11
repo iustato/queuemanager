@@ -11,60 +11,15 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func TestResolveIdemKey_Empty(t *testing.T) {
-	st := openTempStoreWithOpts(t, OpenOptions{FilePath: "test_resolve_idem_empty.db"})
-
-	msgID, ok, err := st.ResolveIdemKey("")
-	if err != nil {
-		t.Fatalf("ResolveIdemKey: %v", err)
-	}
-	if ok {
-		t.Fatalf("expected ok=false")
-	}
-	if msgID != "" {
-		t.Fatalf("expected msgID empty")
-	}
-}
-
-func TestResolveIdemKey_Found(t *testing.T) {
-	st := openTempStoreWithOpts(t, OpenOptions{FilePath: "test_resolve_idem_found.db"})
-
-	ctx := context.Background()
-	queue := "q1"
-	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
-	body := []byte(`{"text":"hello"}`)
-
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
-	if err != nil {
-		t.Fatalf("PutNewMessage: %v", err)
-	}
-	if !created {
-		t.Fatalf("expected created")
-	}
-
-	got, ok, err := st.ResolveIdemKey(idem)
-	if err != nil {
-		t.Fatalf("ResolveIdemKey: %v", err)
-	}
-	if !ok {
-		t.Fatalf("expected ok=true")
-	}
-	if got != msgID {
-		t.Fatalf("msgID: got %q want %q", got, msgID)
-	}
-}
-
 func TestGetStatusAndResult_NotReady(t *testing.T) {
 	st := openTempStoreWithOpts(t, OpenOptions{FilePath: "test_get_status_not_ready.db"})
 
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"nr"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -90,10 +45,9 @@ func TestGetStatusAndResult_Succeeded(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"ok"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -138,10 +92,9 @@ func TestGetStatusAndResult_Failed(t *testing.T) {
 	ctx := context.Background()
 	queue := "q1"
 	msgID := newUUIDv7ForTest(t)
-	idem := newUUIDv7ForTest(t)
 	body := []byte(`{"text":"fail"}`)
 
-	_, created, err := st.PutNewMessage(ctx, queue, msgID, body, idem, time.Now().UnixMilli(), 0)
+	_, created, _, err := st.PutNewMessage(ctx, queue, msgID, body, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage: %v", err)
 	}
@@ -186,8 +139,7 @@ func TestGetInfo_ComputesCountsRetriesAndAvg(t *testing.T) {
 
 	// succeeded #1 (attempt=3 => retries +2, duration 100)
 	msg1 := newUUIDv7ForTest(t)
-	idem1 := newUUIDv7ForTest(t)
-	_, _, err := st.PutNewMessage(ctx, queue, msg1, []byte(`{"n":1}`), idem1, now, 0)
+	_, _, _, err := st.PutNewMessage(ctx, queue, msg1, []byte(`{"n":1}`), now, 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage #1: %v", err)
 	}
@@ -200,8 +152,7 @@ func TestGetInfo_ComputesCountsRetriesAndAvg(t *testing.T) {
 
 	// succeeded #2 (attempt=1 => retries +0, duration 200)
 	msg2 := newUUIDv7ForTest(t)
-	idem2 := newUUIDv7ForTest(t)
-	_, _, err = st.PutNewMessage(ctx, queue, msg2, []byte(`{"n":2}`), idem2, now, 0)
+	_, _, _, err = st.PutNewMessage(ctx, queue, msg2, []byte(`{"n":2}`), now, 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage #2: %v", err)
 	}
@@ -214,8 +165,7 @@ func TestGetInfo_ComputesCountsRetriesAndAvg(t *testing.T) {
 
 	// failed (attempt=2 => retries +1)
 	msg3 := newUUIDv7ForTest(t)
-	idem3 := newUUIDv7ForTest(t)
-	_, _, err = st.PutNewMessage(ctx, queue, msg3, []byte(`{"n":3}`), idem3, now, 0)
+	_, _, _, err = st.PutNewMessage(ctx, queue, msg3, []byte(`{"n":3}`), now, 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage #3: %v", err)
 	}
@@ -260,8 +210,7 @@ func TestGetInfoAll_PerQueueAggregation(t *testing.T) {
 
 	// q1 succeeded duration 50
 	msg1 := newUUIDv7ForTest(t)
-	idem1 := newUUIDv7ForTest(t)
-	_, _, err := st.PutNewMessage(ctx, "q1", msg1, []byte(`{"q":"q1"}`), idem1, now, 0)
+	_, _, _, err := st.PutNewMessage(ctx, "q1", msg1, []byte(`{"q":"q1"}`), now, 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage q1: %v", err)
 	}
@@ -274,8 +223,7 @@ func TestGetInfoAll_PerQueueAggregation(t *testing.T) {
 
 	// q2 succeeded duration 300
 	msg2 := newUUIDv7ForTest(t)
-	idem2 := newUUIDv7ForTest(t)
-	_, _, err = st.PutNewMessage(ctx, "q2", msg2, []byte(`{"q":"q2"}`), idem2, now, 0)
+	_, _, _, err = st.PutNewMessage(ctx, "q2", msg2, []byte(`{"q":"q2"}`), now, 0)
 	if err != nil {
 		t.Fatalf("PutNewMessage q2: %v", err)
 	}
@@ -365,7 +313,7 @@ func TestGetInfoAll_CorruptMeta_IsSkipped(t *testing.T) {
 
 		m := Meta{
 			Queue:          "q1",
-			MsgID:          "ok1",
+			MessageGUID:    "ok1",
 			Status:         StatusSucceeded,
 			Attempt:        1,
 			ExecutedTimeMs: 10,

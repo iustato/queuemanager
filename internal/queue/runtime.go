@@ -43,35 +43,34 @@ type runtimeState struct {
 
 type QueueStore interface {
 	// Create message with dedup barrier.
-	// Returns (effectiveMsgID, created, error).
+	// Returns (guid, created, enqueuedAtMs, error).
 	PutNewMessage(
 		ctx context.Context,
-		queue, msgID string,
+		queue, guid string,
 		body []byte,
-		idempotencyKey string,
 		enqueuedAtMs int64,
 		expiresAtMs int64,
-	) (string, bool, error)
+	) (string, bool, int64, error)
 
 	// Atomically mark that message was actually put into in-memory queue successfully.
-	MarkQueued(msgID string) error
+	MarkQueued(guid string) error
 
 	// Persist that message must be re-enqueued later (enqueue failed / retry scheduled / stuck recovered).
 	// Uses enqueue-failed index (bEnqFail).
-	MarkEnqueueFailed(msgID string, reason string) error
+	MarkEnqueueFailed(guid string, reason string) error
 
 	// Worker lifecycle
-	MarkProcessing(msgID string, attempt int) error
-	TouchProcessing(msgID string) error
+	MarkProcessing(guid string, attempt int) error
+	TouchProcessing(guid string) error
 
 	// Retry scheduling (persist before planning retry in memory)
-	RequeueForRetry(msgID string, ts int64) error
+	RequeueForRetry(guid string, ts int64) error
 
 	// Finish
-	MarkDone(msgID string, status storage.Status, res storage.Result, ttl int64) error
+	MarkDone(guid string, status storage.Status, res storage.Result, ttl int64) error
 
 	// Read API
-	GetStatusAndResult(msgID string) (storage.Status, storage.Result, error)
+	GetStatusAndResult(guid string) (storage.Status, storage.Result, error)
 	GetInfo(queueName string, fromTime int64) (storage.QueueInfo, error)
 
 	// Background maintenance
@@ -241,6 +240,7 @@ func NewRuntime(
 
 		case RuntimePHPCGI:
 			return PHPCGIRunner{
+				PhpCgiBin:        ro.phpCgiBin,
 				MaxStdoutBytes:   cfg.MaxStdoutBytes,
 				MaxStderrBytes:   cfg.MaxStderrBytes,
 				KillProcessGroup: true,
@@ -330,7 +330,7 @@ func (rt *Runtime) Enqueue(ctx context.Context, job Job) error {
 	default:
 		rt.st.log.Warn("queue_full_waiting_enqueue",
 			zap.String("queue", rt.Cfg.Name),
-			zap.String("msg_id", job.MsgID),
+			zap.String("message_guid", job.MessageGUID),
 			zap.Int("attempt", job.Attempt),
 		)
 	}
@@ -433,7 +433,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 			default:
 				if enqueueSafe(job) {
 					rt.st.log.Info("job_requeued",
-						zap.String("msg_id", job.MsgID),
+						zap.String("message_guid", job.MessageGUID),
 						zap.Int("attempt", job.Attempt),
 						zap.Int64("retry_delay_ms", int64(delay/time.Millisecond)),
 					)
@@ -458,7 +458,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 				if r := recover(); r != nil {
 					rt.st.log.Error("worker_panic_recovered",
 						zap.Any("panic", r),
-						zap.String("msg_id", job.MsgID),
+						zap.String("message_guid", job.MessageGUID),
 						zap.Int("worker_id", workerID),
 					)
 
@@ -473,7 +473,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 						}
 
 						if err := rt.Store.MarkDone(
-							job.MsgID,
+							job.MessageGUID,
 							storage.StatusFailed,
 							storage.Result{
 								FinishedAt: now,
@@ -484,7 +484,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 							ttlMs,
 						); err != nil {
 							rt.st.log.Error("mark_done_after_panic_failed",
-								zap.String("msg_id", job.MsgID),
+								zap.String("message_guid", job.MessageGUID),
 								zap.Error(err),
 							)
 						}
@@ -494,9 +494,9 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 
 			// 1) MarkProcessing
 			if rt.Store != nil {
-				if err := rt.Store.MarkProcessing(job.MsgID, job.Attempt); err != nil {
+				if err := rt.Store.MarkProcessing(job.MessageGUID, job.Attempt); err != nil {
 					rt.st.log.Warn("mark_processing_failed",
-						zap.String("msg_id", job.MsgID),
+						zap.String("message_guid", job.MessageGUID),
 						zap.Int("worker_id", workerID),
 						zap.Error(err),
 					)
@@ -523,10 +523,10 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 
 				// Persist retry before scheduling in memory
 				if rt.Store != nil {
-					err := rt.Store.RequeueForRetry(job.MsgID, time.Now().UnixMilli())
+					err := rt.Store.RequeueForRetry(job.MessageGUID, time.Now().UnixMilli())
 					if err != nil {
 						rt.st.log.Error("failed_to_persist_retry_status",
-							zap.String("msg_id", job.MsgID),
+							zap.String("message_guid", job.MessageGUID),
 							zap.Error(err),
 						)
 						return
@@ -536,7 +536,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 				scheduleRetry(next)
 
 				rt.st.log.Warn("job_retry_persistent_ok",
-					zap.String("msg_id", job.MsgID),
+					zap.String("message_guid", job.MessageGUID),
 					zap.Int("to_attempt", next.Attempt),
 				)
 				return
@@ -558,7 +558,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 				}
 
 				err := rt.Store.MarkDone(
-					job.MsgID,
+					job.MessageGUID,
 					status,
 					storage.Result{
 						FinishedAt: now.UnixMilli(),
@@ -571,14 +571,14 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 
 				if err != nil {
 					rt.st.log.Warn("mark_done_failed",
-						zap.String("msg_id", job.MsgID),
+						zap.String("message_guid", job.MessageGUID),
 						zap.Int("attempt", job.Attempt),
 						zap.String("final_status", string(status)),
 						zap.Error(err),
 					)
 				} else {
 					rt.st.log.Info("mark_done_ok",
-						zap.String("msg_id", job.MsgID),
+						zap.String("message_guid", job.MessageGUID),
 						zap.Int("attempt", job.Attempt),
 						zap.String("final_status", string(status)),
 						zap.Int("exit_code", res.ExitCode),
@@ -590,7 +590,7 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 
 			// 6) Log
 			fields := []zap.Field{
-				zap.String("msg_id", job.MsgID),
+				zap.String("message_guid", job.MessageGUID),
 				zap.Int("worker_id", workerID),
 				zap.Int("exit_code", res.ExitCode),
 				zap.Int("attempt", job.Attempt),
@@ -682,7 +682,7 @@ func (rt *Runtime) appendStdStreams(job Job, out, errb []byte) {
 		dir = filepath.Join(rt.Cfg.LogDir, job.Queue)
 	}
 
-	logPath := filepath.Join(dir, job.MsgID+".log")
+	logPath := filepath.Join(dir, job.MessageGUID+".log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		rt.st.log.Warn("open_job_log_failed", zap.String("path", logPath), zap.Error(err))

@@ -43,7 +43,7 @@ func TestRuntime_RetryGoroutine_AfterStop_DoesNotReenqueue(t *testing.T) {
 	exp := time.Now().Add(time.Hour).UnixMilli()
 	msgID := "m1"
 
-	_, _, _ = ms.PutNewMessage(context.Background(), "q1", msgID, []byte(`{"x":1}`), "idem", now, exp)
+	_, _, _, _ = ms.PutNewMessage(context.Background(), "q1", msgID, []byte(`{"x":1}`), now, exp)
 
 	// стартуем 1 воркер
 	runner := &alwaysFailRunner{}
@@ -51,7 +51,7 @@ func TestRuntime_RetryGoroutine_AfterStop_DoesNotReenqueue(t *testing.T) {
 	go rt.workerLoop(1, runner)
 
 	// enqueue first attempt
-	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: msgID, Attempt: 1}); err != nil {
+	if err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: msgID, Attempt: 1}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestRuntime_RetryGoroutine_AfterStop_DoesNotReenqueue(t *testing.T) {
 		ms.mu.Lock()
 		seen1 := false
 		for _, c := range ms.markProcessingCalls {
-			if c.MsgID == msgID && c.Attempt == 1 {
+			if c.GUID == msgID && c.Attempt == 1 {
 				seen1 = true
 				break
 			}
@@ -85,7 +85,7 @@ func TestRuntime_RetryGoroutine_AfterStop_DoesNotReenqueue(t *testing.T) {
 	defer ms.mu.Unlock()
 
 	for _, c := range ms.markProcessingCalls {
-		if c.MsgID == msgID && c.Attempt >= 2 {
+		if c.GUID == msgID && c.Attempt >= 2 {
 			t.Fatalf("retry attempt started after Stop(): attempt=%d", c.Attempt)
 		}
 	}

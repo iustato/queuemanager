@@ -25,12 +25,11 @@ func TestGC_ShouldDeleteExpiredMessages(t *testing.T) {
 	msgID := "expired_msg_1"
 	expiresAt := time.Now().Add(-1 * time.Minute).UnixMilli()
 
-	_, _, err = store.PutNewMessage(
+	_, _, _, err = store.PutNewMessage(
 		ctx,
 		"queue1",
 		msgID,
 		[]byte(`{"text":"old"}`),
-		"idem_gc_1",
 		0,
 		expiresAt,
 	)
@@ -46,7 +45,7 @@ func TestGC_ShouldDeleteExpiredMessages(t *testing.T) {
 		t.Fatalf("expected at least 1 deleted message, got %d", len(deleted))
 	}
 
-	_, _, err = store.GetByMsgID(msgID)
+	_, _, err = store.GetByGUID(msgID)
 	if err == nil {
 		t.Fatalf("expected message to be deleted")
 	}

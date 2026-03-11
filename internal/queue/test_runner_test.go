@@ -54,24 +54,24 @@ func (tr *TestRunner) Run(ctx context.Context, _ []string, _ string, job Job) Re
 	switch m {
 	case ModeOK:
 		select {
-		case tr.done <- job.MsgID:
+		case tr.done <- job.MessageGUID:
 		default:
 		}
 		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
+			Queue:       job.Queue,
+			MessageGUID: job.MessageGUID,
 			ExitCode:   0,
 			DurationMs: time.Since(start).Milliseconds(),
 		}
 
 	case ModeFail:
 		select {
-		case tr.done <- job.MsgID:
+		case tr.done <- job.MessageGUID:
 		default:
 		}
 		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
+			Queue:       job.Queue,
+			MessageGUID: job.MessageGUID,
 			ExitCode:   1,
 			DurationMs: time.Since(start).Milliseconds(),
 			Err:        tr.failErr,
@@ -83,12 +83,12 @@ func (tr *TestRunner) Run(ctx context.Context, _ []string, _ string, job Job) Re
 	case ModeBlock:
 		<-ctx.Done()
 		select {
-		case tr.done <- job.MsgID:
+		case tr.done <- job.MessageGUID:
 		default:
 		}
 		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
+			Queue:       job.Queue,
+			MessageGUID: job.MessageGUID,
 			ExitCode:   1,
 			DurationMs: time.Since(start).Milliseconds(),
 			Err:        ctx.Err(),
@@ -96,12 +96,12 @@ func (tr *TestRunner) Run(ctx context.Context, _ []string, _ string, job Job) Re
 
 	default:
 		select {
-		case tr.done <- job.MsgID:
+		case tr.done <- job.MessageGUID:
 		default:
 		}
 		return Result{
-			Queue:      job.Queue,
-			MsgID:      job.MsgID,
+			Queue:       job.Queue,
+			MessageGUID: job.MessageGUID,
 			ExitCode:   0,
 			DurationMs: time.Since(start).Milliseconds(),
 		}

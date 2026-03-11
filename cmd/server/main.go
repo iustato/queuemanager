@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,38 +21,6 @@ import (
 	"go.uber.org/zap"
 )
 
-func envInt(key string, def int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func envInt64(key string, def int64) int64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func envStr(key, def string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	return v
-}
-
 func main() {
 	logger, err := logging.NewProductionLogger()
 	if err != nil {
@@ -61,34 +28,30 @@ func main() {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	queuesDir := envStr("QUEUES_CONFIG_DIR", "./configs")
+	// --- load server config from .env file ---
+	sc := config.LoadServerConfig(".env")
 
-	cfgs, err := config.LoadQueueConfigs(queuesDir)
+	cfgs, err := config.LoadQueueConfigs(sc.QueuesConfigDir)
 	if err != nil {
 		logger.Fatal("load queue configs",
-			zap.String("dir", queuesDir),
+			zap.String("dir", sc.QueuesConfigDir),
 			zap.Error(err),
 		)
 	}
 
 	// --- storage (bbolt) — per-queue files ---
-	storageDir := envStr("QUEUE_STORAGE_DIR", "./data")
-	if err := os.MkdirAll(storageDir, 0o755); err != nil {
-		logger.Fatal("mkdir storage dir", zap.String("path", storageDir), zap.Error(err))
+	if err := os.MkdirAll(sc.QueueStorageDir, 0o755); err != nil {
+		logger.Fatal("mkdir storage dir", zap.String("path", sc.QueueStorageDir), zap.Error(err))
 	}
 
-	storageOpenTimeout := time.Duration(envInt("STORAGE_OPEN_TIMEOUT_MS", 2000)) * time.Millisecond
-	processingTimeoutMs := envInt64("PROCESSING_TIMEOUT_MS", 120_000)
-	gcProcessingGraceMs := envInt64("GC_PROCESSING_GRACE_MS", 120_000)
-
 	storageOpts := storage.OpenOptions{
-		Timeout:             storageOpenTimeout,
-		ProcessingTimeoutMs: processingTimeoutMs,
-		GCProcessingGraceMs: gcProcessingGraceMs,
+		Timeout:             time.Duration(sc.StorageOpenTimeoutMs) * time.Millisecond,
+		ProcessingTimeoutMs: sc.ProcessingTimeoutMs,
+		GCProcessingGraceMs: sc.GCProcessingGraceMs,
 	}
 
 	// --- queues ---
-	qm := queue.NewManager(logger, storageDir, storageOpts)
+	qm := queue.NewManager(logger, sc.QueueStorageDir, storageOpts, sc.WorkerToken, sc.AllowAutoGUID, sc.PhpCgiBin)
 
 	for _, qc := range cfgs {
 		sch, err := validate.LoadSchemaFromFile(qc.SchemaFile)
@@ -108,7 +71,7 @@ func main() {
 	}
 
 	logger.Info("queues loaded",
-		zap.String("queues_dir", queuesDir),
+		zap.String("queues_dir", sc.QueuesConfigDir),
 		zap.Strings("queues", qm.ListNames()),
 	)
 
@@ -124,8 +87,7 @@ func main() {
 		http.Redirect(w, r, "/health", http.StatusPermanentRedirect)
 	})
 
-	staticDir := envStr("STATIC_DIR", "web/static")
-	fs := http.FileServer(http.Dir(staticDir))
+	fs := http.FileServer(http.Dir(sc.StaticDir))
 	publicMux.Handle("/static/", http.StripPrefix("/static/", fs))
 
 	// --- admin API (CRUD queues) ---
@@ -158,7 +120,7 @@ func main() {
 
 	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
-			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+			http.ServeFile(w, r, filepath.Join(sc.StaticDir, "index.html"))
 			return
 		}
 
@@ -215,14 +177,12 @@ func main() {
 
 	var publicHandler http.Handler = publicMux
 	publicHandler = httpserver.RequestID(publicHandler)
-	publicHandler = httpserver.AccessLog(logger, publicHandler)
+	publicHandler = httpserver.AccessLog(logger, publicHandler, sc.DisableAccessLog)
 
-	publicAddr := envStr("PUBLIC_ADDR", "0.0.0.0:8080")
-
-	readHeaderTimeout := time.Duration(envInt("READ_HEADER_TIMEOUT_SEC", 5)) * time.Second
+	readHeaderTimeout := time.Duration(sc.ReadHeaderTimeoutSec) * time.Second
 
 	publicSrv := httpserver.New(httpserver.Config{
-		Addr:              publicAddr,
+		Addr:              sc.PublicAddr,
 		ReadHeaderTimeout: readHeaderTimeout,
 		Handler:           publicHandler,
 	})
@@ -230,7 +190,7 @@ func main() {
 	// --- internal mux (worker callbacks) ---
 	internalMux := http.NewServeMux()
 	internalMux.HandleFunc("/internal/", func(w http.ResponseWriter, r *http.Request) {
-		// /internal/{queue}/done/{msg_id}
+		// /internal/{queue}/done/{guid}
 		path := strings.Trim(r.URL.Path, "/")
 		parts := strings.Split(path, "/")
 
@@ -246,14 +206,12 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	internalAddr := envStr("INTERNAL_ADDR", "127.0.0.1:8081")
-
 	var internalHandler http.Handler = internalMux
 	internalHandler = httpserver.RequestID(internalHandler)
-	internalHandler = httpserver.AccessLog(logger.Named("internal"), internalHandler)
+	internalHandler = httpserver.AccessLog(logger.Named("internal"), internalHandler, sc.DisableAccessLog)
 
 	internalSrv := httpserver.New(httpserver.Config{
-		Addr:              internalAddr,
+		Addr:              sc.InternalAddr,
 		ReadHeaderTimeout: readHeaderTimeout,
 		Handler:           internalHandler,
 	})
@@ -262,12 +220,12 @@ func main() {
 	errCh := make(chan error, 2)
 
 	go func() {
-		logger.Info("starting public server", zap.String("addr", publicAddr))
+		logger.Info("starting public server", zap.String("addr", sc.PublicAddr))
 		errCh <- publicSrv.ListenAndServe()
 	}()
 
 	go func() {
-		logger.Info("starting internal server", zap.String("addr", internalAddr))
+		logger.Info("starting internal server", zap.String("addr", sc.InternalAddr))
 		errCh <- internalSrv.ListenAndServe()
 	}()
 
@@ -285,7 +243,7 @@ func main() {
 	}
 
 	// --- graceful shutdown ---
-	shutdownTimeout := time.Duration(envInt("SHUTDOWN_TIMEOUT_SEC", 10)) * time.Second
+	shutdownTimeout := time.Duration(sc.ShutdownTimeoutSec) * time.Second
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 
@@ -304,7 +262,7 @@ func main() {
 		close(stopDone)
 	}()
 
-	stopTimeout := time.Duration(envInt("STOP_ALL_TIMEOUT_SEC", 30)) * time.Second
+	stopTimeout := time.Duration(sc.StopAllTimeoutSec) * time.Second
 	select {
 	case <-stopDone:
 		logger.Info("all queues stopped gracefully")

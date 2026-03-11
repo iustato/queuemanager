@@ -8,11 +8,11 @@ import (
 )
 
 func TestServiceErrors_ErrorAndUnwrap(t *testing.T) {
-	// ErrInvalidIdemKey.Error()
+	// ErrInvalidMessageGUID.Error()
 	{
-		e := ErrInvalidIdemKey{Msg: "bad idem"}
-		if got := e.Error(); got != "bad idem" {
-			t.Fatalf("ErrInvalidIdemKey.Error(): got %q want %q", got, "bad idem")
+		e := ErrInvalidMessageGUID{Msg: "bad guid"}
+		if got := e.Error(); got != "bad guid" {
+			t.Fatalf("ErrInvalidMessageGUID.Error(): got %q want %q", got, "bad guid")
 		}
 	}
 

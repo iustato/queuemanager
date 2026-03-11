@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -117,17 +116,9 @@ func normalizeConfig(cfg *QueueConfig, fileName, baseDir string) error {
 		cfg.Script = filepath.Join(baseDir, cfg.Script)
 	}
 
-		// ---- defaults for idempotency/storage ----
-	if strings.TrimSpace(cfg.Idempotency.AcceptMaxAge) == "" {
-		cfg.Idempotency.AcceptMaxAge = "30d"
-	}
-	if strings.TrimSpace(cfg.Idempotency.RetentionMin) == "" {
-		cfg.Idempotency.RetentionMin = cfg.Idempotency.AcceptMaxAge
-	}
-
-	// если не forever и retention не задан — храним минимум окно дедупа
+		// ---- defaults for storage ----
 	if !cfg.Storage.Forever && strings.TrimSpace(cfg.Storage.Retention) == "" {
-		cfg.Storage.Retention = cfg.Idempotency.RetentionMin
+		cfg.Storage.Retention = "30d"
 	}
 
 	// дефолты GC (можно считать 0 => дефолт)
@@ -211,21 +202,9 @@ func validateConfig(cfg QueueConfig) error {
 		return fmt.Errorf("workers must be > 0")
 	}
 
-	// durations (после normalizeConfig они уже не пустые)
-	accept, err := ParseDurationExt(cfg.Idempotency.AcceptMaxAge)
-	if err != nil {
-		return fmt.Errorf("idempotency.accept_max_age: %w", err)
-	}
-
-	retMin, err := ParseDurationExt(cfg.Idempotency.RetentionMin)
-	if err != nil {
-		return fmt.Errorf("idempotency.retention_min: %w", err)
-	}
-
-	var ret time.Duration
+	// durations
 	if !cfg.Storage.Forever {
-		ret, err = ParseDurationExt(cfg.Storage.Retention)
-		if err != nil {
+		if _, err := ParseDurationExt(cfg.Storage.Retention); err != nil {
 			return fmt.Errorf("storage.retention: %w", err)
 		}
 	}
@@ -243,17 +222,6 @@ func validateConfig(cfg QueueConfig) error {
 	}
 	if _, err := ParseDurationExt(cfg.MessageExpiry); err != nil {
 		return fmt.Errorf("message_expiry: %w", err)
-	}
-
-	// если не forever — retention должен быть >= max(retMin, accept)
-	if !cfg.Storage.Forever {
-		minNeed := retMin
-		if accept > minNeed {
-			minNeed = accept
-		}
-		if ret != 0 && ret < minNeed {
-			return fmt.Errorf("storage.retention must be >= idempotency window (need at least %s)", minNeed)
-		}
 	}
 
 	return nil
@@ -274,18 +242,8 @@ func ValidateConfigForAPI(cfg QueueConfig) error {
 		return fmt.Errorf("workers must be > 0")
 	}
 
-	accept, err := ParseDurationExt(cfg.Idempotency.AcceptMaxAge)
-	if err != nil {
-		return fmt.Errorf("idempotency.accept_max_age: %w", err)
-	}
-	retMin, err := ParseDurationExt(cfg.Idempotency.RetentionMin)
-	if err != nil {
-		return fmt.Errorf("idempotency.retention_min: %w", err)
-	}
-	var ret time.Duration
 	if !cfg.Storage.Forever {
-		ret, err = ParseDurationExt(cfg.Storage.Retention)
-		if err != nil {
+		if _, err := ParseDurationExt(cfg.Storage.Retention); err != nil {
 			return fmt.Errorf("storage.retention: %w", err)
 		}
 	}
@@ -300,29 +258,14 @@ func ValidateConfigForAPI(cfg QueueConfig) error {
 	if _, err := ParseDurationExt(cfg.MessageExpiry); err != nil {
 		return fmt.Errorf("message_expiry: %w", err)
 	}
-	if !cfg.Storage.Forever {
-		minNeed := retMin
-		if accept > minNeed {
-			minNeed = accept
-		}
-		if ret != 0 && ret < minNeed {
-			return fmt.Errorf("storage.retention must be >= idempotency window (need at least %s)", minNeed)
-		}
-	}
 	return nil
 }
 
 // NormalizeConfigForAPI sets defaults for a config received via admin API.
 // Unlike normalizeConfig it does NOT resolve file paths (schema/script come inline).
 func NormalizeConfigForAPI(cfg *QueueConfig) {
-	if cfg.Idempotency.AcceptMaxAge == "" {
-		cfg.Idempotency.AcceptMaxAge = "30d"
-	}
-	if cfg.Idempotency.RetentionMin == "" {
-		cfg.Idempotency.RetentionMin = cfg.Idempotency.AcceptMaxAge
-	}
 	if !cfg.Storage.Forever && cfg.Storage.Retention == "" {
-		cfg.Storage.Retention = cfg.Idempotency.RetentionMin
+		cfg.Storage.Retention = "30d"
 	}
 	if cfg.Storage.GCIntervalSec == 0 {
 		cfg.Storage.GCIntervalSec = 60

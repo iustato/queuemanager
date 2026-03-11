@@ -128,14 +128,14 @@ func (m *Manager) HandleGetInfo(queueName string, w http.ResponseWriter, r *http
 	})
 }
 
-// GET /{queue}/status/{msg_id}
-func (m *Manager) HandleGetStatus(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
+// GET /{queue}/status/{guid}
+func (m *Manager) HandleGetStatus(queueName, guid string, w http.ResponseWriter, r *http.Request) {
 	queueName = strings.TrimSpace(queueName)
-	msgID = strings.TrimSpace(msgID)
-	if queueName == "" || msgID == "" {
+	guid = strings.TrimSpace(guid)
+	if queueName == "" || guid == "" {
 		writeAPIError(w, r, http.StatusBadRequest,
 			"bad_request",
-			"queue and msg_id are required",
+			"queue and message_guid are required",
 			nil,
 		)
 		return
@@ -158,39 +158,39 @@ func (m *Manager) HandleGetStatus(queueName, msgID string, w http.ResponseWriter
 		return
 	}
 
-	st, _, err := rt.Store.GetStatusAndResult(msgID)
+	st, _, err := rt.Store.GetStatusAndResult(guid)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotReady) {
 			writeAPIError(w, r, http.StatusConflict,
 				"not_ready",
 				"status is not ready yet",
-				map[string]any{"queue": queueName, "msg_id": msgID},
+				map[string]any{"queue": queueName, "message_guid": guid},
 			)
 			return
 		}
 		writeAPIError(w, r, http.StatusNotFound,
 			"not_found",
 			err.Error(),
-			map[string]any{"queue": queueName, "msg_id": msgID},
+			map[string]any{"queue": queueName, "message_guid": guid},
 		)
 		return
 	}
 
 	writeAPIOK(w, r, http.StatusOK, map[string]any{
-		"queue":  queueName,
-		"msg_id": msgID,
-		"status": st,
+		"queue":        queueName,
+		"message_guid": guid,
+		"status":       st,
 	})
 }
 
-// GET /{queue}/result/{msg_id}
-func (m *Manager) HandleGetResult(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
+// GET /{queue}/result/{guid}
+func (m *Manager) HandleGetResult(queueName, guid string, w http.ResponseWriter, r *http.Request) {
 	queueName = strings.TrimSpace(queueName)
-	msgID = strings.TrimSpace(msgID)
-	if queueName == "" || msgID == "" {
+	guid = strings.TrimSpace(guid)
+	if queueName == "" || guid == "" {
 		writeAPIError(w, r, http.StatusBadRequest,
 			"bad_request",
-			"queue and msg_id are required",
+			"queue and message_guid are required",
 			nil,
 		)
 		return
@@ -213,39 +213,39 @@ func (m *Manager) HandleGetResult(queueName, msgID string, w http.ResponseWriter
 		return
 	}
 
-	st, res, err := rt.Store.GetStatusAndResult(msgID)
+	st, res, err := rt.Store.GetStatusAndResult(guid)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotReady) {
 			writeAPIError(w, r, http.StatusConflict,
 				"not_ready",
 				"result is not ready yet",
-				map[string]any{"queue": queueName, "msg_id": msgID},
+				map[string]any{"queue": queueName, "message_guid": guid},
 			)
 			return
 		}
 		writeAPIError(w, r, http.StatusNotFound,
 			"not_found",
 			err.Error(),
-			map[string]any{"queue": queueName, "msg_id": msgID},
+			map[string]any{"queue": queueName, "message_guid": guid},
 		)
 		return
 	}
 
 	writeAPIOK(w, r, http.StatusOK, map[string]any{
-		"queue":  queueName,
-		"msg_id": msgID,
-		"status": st,
-		"result": res,
+		"queue":        queueName,
+		"message_guid": guid,
+		"status":       st,
+		"result":       res,
 	})
 }
 
-func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWriter, r *http.Request) {
+func (m *Manager) HandleReportDone(queueName, guid string, w http.ResponseWriter, r *http.Request) {
 	queueName = strings.TrimSpace(queueName)
-	msgID = strings.TrimSpace(msgID)
-	if queueName == "" || msgID == "" {
+	guid = strings.TrimSpace(guid)
+	if queueName == "" || guid == "" {
 		writeAPIError(w, r, http.StatusBadRequest,
 			"bad_request",
-			"queue and msg_id are required",
+			"queue and message_guid are required",
 			nil,
 		)
 		return
@@ -339,7 +339,7 @@ func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWrite
 		}
 	}
 
-	if err := rt.Store.MarkDone(msgID, status, storage.Result{
+	if err := rt.Store.MarkDone(guid, status, storage.Result{
 		FinishedAt: finishedAt,
 		ExitCode:   p.ExitCode,
 		DurationMs: p.DurationMs,
@@ -348,15 +348,15 @@ func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWrite
 		writeAPIError(w, r, http.StatusInternalServerError,
 			"internal",
 			err.Error(),
-			map[string]any{"queue": queueName, "msg_id": msgID},
+			map[string]any{"queue": queueName, "message_guid": guid},
 		)
 		return
 	}
 
 	writeAPIOK(w, r, http.StatusOK, map[string]any{
-		"queue":  queueName,
-		"msg_id": msgID,
-		"status": status,
+		"queue":        queueName,
+		"message_guid": guid,
+		"status":       status,
 	})
 }
 

@@ -43,6 +43,7 @@ func newTestManagerWithRuntime(queue string, rt *Runtime) *Manager {
 		queues: map[string]*Runtime{
 			queue: rt,
 		},
+		allowAutoGUID: true,
 	}
 }
 
@@ -66,28 +67,25 @@ func newTestRuntime(t *testing.T, queue string, st QueueStore, schema *validate.
 	return rt
 }
 
-func TestNormalizeIdemKey_Missing_WhenAutoFalse(t *testing.T) {
-	_, err := normalizeIdemKey("", false)
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-	var e ErrInvalidIdemKey
-	if !errors.As(err, &e) {
-		t.Fatalf("expected ErrInvalidIdemKey, got %T: %v", err, err)
-	}
-}
-
-func TestNormalizeIdemKey_Auto_GeneratesUUIDv7(t *testing.T) {
-	key, err := normalizeIdemKey("", true)
+func TestNormalizeMessageGUID_Empty_GeneratesUUIDv7(t *testing.T) {
+	guid, err := normalizeMessageGUID("", true)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	u, err := uuid.Parse(key)
+	u, err := uuid.Parse(guid)
 	if err != nil {
-		t.Fatalf("generated key is not uuid: %v", err)
+		t.Fatalf("generated guid is not uuid: %v", err)
 	}
 	if u.Version() != uuid.Version(7) {
 		t.Fatalf("expected uuidv7, got v%d", u.Version())
+	}
+}
+
+func TestNormalizeMessageGUID_Empty_AutoDisabled_ReturnsError(t *testing.T) {
+	_, err := normalizeMessageGUID("", false)
+	var e ErrInvalidMessageGUID
+	if !errors.As(err, &e) {
+		t.Fatalf("expected ErrInvalidMessageGUID, got %T: %v", err, err)
 	}
 }
 
@@ -96,9 +94,8 @@ func TestQueueService_Push_QueueNotFound(t *testing.T) {
 	svc := NewQueueService(mgr)
 
 	_, err := svc.Push(context.Background(), PushRequest{
-		Queue:    "nope",
-		Body:     []byte(`{"x":1}`),
-		AutoIdem: true,
+		Queue: "nope",
+		Body:  []byte(`{"x":1}`),
 	})
 	if !errors.Is(err, ErrQueueNotFound) {
 		t.Fatalf("expected ErrQueueNotFound, got %T: %v", err, err)
@@ -116,9 +113,8 @@ func TestQueueService_Push_InvalidJSON(t *testing.T) {
 	svc := NewQueueService(mgr)
 
 	_, err := svc.Push(context.Background(), PushRequest{
-		Queue:    "q1",
-		Body:     []byte(`{`), // invalid JSON
-		AutoIdem: true,
+		Queue: "q1",
+		Body:  []byte(`{`), // invalid JSON
 	})
 	var e ErrInvalidJSON
 	if !errors.As(err, &e) {
@@ -141,9 +137,8 @@ func TestQueueService_Push_SchemaViolation(t *testing.T) {
 	svc := NewQueueService(mgr)
 
 	_, err := svc.Push(context.Background(), PushRequest{
-		Queue:    "q1",
-		Body:     []byte(`{"x":"nope"}`), // violates schema
-		AutoIdem: true,
+		Queue: "q1",
+		Body:  []byte(`{"x":"nope"}`), // violates schema
 	})
 	var e ErrSchemaValidation
 	if !errors.As(err, &e) {
@@ -161,9 +156,8 @@ func TestQueueService_Push_TooLarge(t *testing.T) {
 	svc := NewQueueService(mgr)
 
 	_, err := svc.Push(context.Background(), PushRequest{
-		Queue:    "q1",
-		Body:     []byte(`{"x":1}`), // > 3 bytes
-		AutoIdem: true,
+		Queue: "q1",
+		Body:  []byte(`{"x":1}`), // > 3 bytes
 	})
 	var e ErrPayloadTooLarge
 	if !errors.As(err, &e) {
@@ -180,15 +174,14 @@ func TestQueueService_Push_Dedup_ReturnsCreatedFalse_AndDoesNotEnqueue(t *testin
 	mgr := newTestManagerWithRuntime("q1", rt)
 	svc := NewQueueService(mgr)
 
-	// generate valid UUIDv7 for idem
-	idem := uuid.Must(uuid.NewV7()).String()
+	// generate valid UUIDv7 for MessageGUID
+	guid := uuid.Must(uuid.NewV7()).String()
 
 	// 1) first push => created true
 	_, err := svc.Push(context.Background(), PushRequest{
-		Queue:    "q1",
-		Body:     []byte(`{"x":1}`),
-		IdemKey:  idem,
-		AutoIdem: false,
+		Queue:       "q1",
+		Body:        []byte(`{"x":1}`),
+		MessageGUID: guid,
 	})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -201,12 +194,11 @@ func TestQueueService_Push_Dedup_ReturnsCreatedFalse_AndDoesNotEnqueue(t *testin
 		t.Fatalf("expected job enqueued for first push")
 	}
 
-	// 2) second push with same idem => created false and must not enqueue
+	// 2) second push with same guid => created false and must not enqueue
 	resp2, err := svc.Push(context.Background(), PushRequest{
-		Queue:    "q1",
-		Body:     []byte(`{"x":1}`),
-		IdemKey:  idem,
-		AutoIdem: false,
+		Queue:       "q1",
+		Body:        []byte(`{"x":1}`),
+		MessageGUID: guid,
 	})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -232,23 +224,22 @@ func TestQueueService_Push_Success_MarkQueuedCalled(t *testing.T) {
 	svc := NewQueueService(mgr)
 
 	resp, err := svc.Push(context.Background(), PushRequest{
-		Queue:    "q1",
-		Body:     []byte(`{"x":1}`),
-		AutoIdem: true,
-		Method:   "POST",
+		Queue:  "q1",
+		Body:   []byte(`{"x":1}`),
+		Method: "POST",
 	})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if resp.MsgID == "" || resp.IdemKey == "" {
-		t.Fatalf("expected MsgID and IdemKey, got %+v", resp)
+	if resp.MessageGUID == "" {
+		t.Fatalf("expected MessageGUID, got %+v", resp)
 	}
 
 	// job must be in memory queue
 	select {
 	case job := <-rt.st.jobs:
-		if job.MsgID != resp.MsgID {
-			t.Fatalf("job.MsgID mismatch: got %s want %s", job.MsgID, resp.MsgID)
+		if job.MessageGUID != resp.MessageGUID {
+			t.Fatalf("job.MessageGUID mismatch: got %s want %s", job.MessageGUID, resp.MessageGUID)
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatalf("expected job enqueued")
@@ -261,8 +252,8 @@ func TestQueueService_Push_Success_MarkQueuedCalled(t *testing.T) {
 	if len(ms.markQueuedCalls) != 1 {
 		t.Fatalf("expected MarkQueuedCalls=1, got %d", len(ms.markQueuedCalls))
 	}
-	if ms.markQueuedCalls[0] != resp.MsgID {
-		t.Fatalf("MarkQueued msgID mismatch: got %s want %s", ms.markQueuedCalls[0], resp.MsgID)
+	if ms.markQueuedCalls[0] != resp.MessageGUID {
+		t.Fatalf("MarkQueued guid mismatch: got %s want %s", ms.markQueuedCalls[0], resp.MessageGUID)
 	}
 }
 
@@ -280,7 +271,7 @@ func TestRuntime_Enqueue_Full_ReturnsQueueBusy(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	err := rt.Enqueue(ctx, Job{Queue: "q1", MsgID: "m1", Attempt: 1})
+	err := rt.Enqueue(ctx, Job{Queue: "q1", MessageGUID: "m1", Attempt: 1})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -300,7 +291,7 @@ func TestRuntime_Enqueue_ContextTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	err := rt.Enqueue(ctx, Job{Queue: "q1", MsgID: "m1", Attempt: 1})
+	err := rt.Enqueue(ctx, Job{Queue: "q1", MessageGUID: "m1", Attempt: 1})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -318,7 +309,7 @@ func TestRuntime_Enqueue_Stopped_ReturnsQueueStopped(t *testing.T) {
 	}
 	close(rt.st.quit)
 
-	err := rt.Enqueue(context.Background(), Job{Queue: "q1", MsgID: "m1", Attempt: 1})
+	err := rt.Enqueue(context.Background(), Job{Queue: "q1", MessageGUID: "m1", Attempt: 1})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -333,8 +324,8 @@ func TestQueueService_Push_WhenEnqueueFails_DoesNotMarkQueued(t *testing.T) {
 	schema := mustLoadSchema(t, `{"type":"object"}`)
 
 	rt := &Runtime{
-		Cfg:   config.QueueConfig{Name: "q1"},
-		Store: ms,
+		Cfg:    config.QueueConfig{Name: "q1"},
+		Store:  ms,
 		Schema: schema,
 	}
 	rt.st = &runtimeState{
@@ -349,10 +340,9 @@ func TestQueueService_Push_WhenEnqueueFails_DoesNotMarkQueued(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := svc.Push(context.Background(), PushRequest{
-			Queue:    "q1",
-			Body:     []byte(`{"x":1}`),
-			AutoIdem: true,
-			Method:   "POST",
+			Queue:  "q1",
+			Body:   []byte(`{"x":1}`),
+			Method: "POST",
 		})
 		errCh <- err
 	}()

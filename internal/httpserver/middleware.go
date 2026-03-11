@@ -3,7 +3,6 @@ package httpserver
 import (
 	"net"
 	"net/http"
-	"os"
 	"time"
 
 	"go.uber.org/zap"
@@ -30,8 +29,8 @@ func (w *statusWriter) Write(p []byte) (int, error) {
 }
 
 // AccessLog — лог на каждый запрос: метод, путь, статус, длительность.
-func AccessLog(log *zap.Logger, next http.Handler) http.Handler {
-	if os.Getenv("DISABLE_ACCESS_LOG") == "1" {
+func AccessLog(log *zap.Logger, next http.Handler, disabled ...bool) http.Handler {
+	if len(disabled) > 0 && disabled[0] {
 		return next
 	}
 
