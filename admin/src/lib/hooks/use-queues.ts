@@ -22,18 +22,24 @@ export function useListQueues() {
   })
 }
 
-export function useAllQueuesInfo(fromTimeMs?: number) {
+export function useAllQueuesInfo(windowMs?: number) {
   return useQuery({
-    queryKey: queueKeys.info(undefined, fromTimeMs),
-    queryFn: () => getAllQueuesInfo(fromTimeMs),
+    queryKey: queueKeys.info(undefined, windowMs),
+    queryFn: () => {
+      const fromMs = windowMs && windowMs > 0 ? Date.now() - windowMs : undefined
+      return getAllQueuesInfo(fromMs)
+    },
     refetchInterval: 5_000,
   })
 }
 
-export function useQueueInfo(queue: string, fromTimeMs?: number) {
+export function useQueueInfo(queue: string, windowMs?: number) {
   return useQuery({
-    queryKey: queueKeys.info(queue, fromTimeMs),
-    queryFn: () => getQueueInfo(queue, fromTimeMs),
+    queryKey: queueKeys.info(queue, windowMs),
+    queryFn: () => {
+      const fromMs = windowMs && windowMs > 0 ? Date.now() - windowMs : undefined
+      return getQueueInfo(queue, fromMs)
+    },
     enabled: !!queue,
     refetchInterval: 3_000,
   })

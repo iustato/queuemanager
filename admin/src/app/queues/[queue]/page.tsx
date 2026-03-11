@@ -36,8 +36,7 @@ export default function QueueDetailPage({ params }: { params: Promise<{ queue: s
   const [jobPayload, setJobPayload] = useState('{}')
   const [deleteOpen, setDeleteOpen] = useState(false)
 
-  const fromMs = timeFilter > 0 ? Date.now() - timeFilter : undefined
-  const { data: info, isLoading: infoLoading } = useQueueInfo(queueName, fromMs)
+  const { data: info, isLoading: infoLoading } = useQueueInfo(queueName, timeFilter)
   const { data: listData } = useListQueues()
   const submit = useSubmitJob()
 

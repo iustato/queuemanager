@@ -332,11 +332,11 @@ func (m *Manager) HandleReportDone(queueName, msgID string, w http.ResponseWrite
 
 	ttl := p.TTLms
 	if ttl == 0 {
-		defaultTTL := 10 * time.Minute
 		if parsed, err := config.ParseDurationExt(rt.Cfg.ResultTTL); err == nil && parsed > 0 {
-			defaultTTL = parsed
+			ttl = time.Now().Add(parsed).UnixMilli()
+		} else {
+			ttl = -1 // хранить вечно
 		}
-		ttl = time.Now().Add(defaultTTL).UnixMilli()
 	}
 
 	if err := rt.Store.MarkDone(msgID, status, storage.Result{

@@ -146,9 +146,7 @@ func normalizeConfig(cfg *QueueConfig, fileName, baseDir string) error {
 	}
 
 	// TTLs
-	if strings.TrimSpace(cfg.ResultTTL) == "" {
-		cfg.ResultTTL = "10m"
-	}
+	// result_ttl: если не задан — результаты хранятся вечно (не удаляются GC)
 	if strings.TrimSpace(cfg.MessageExpiry) == "" {
 		cfg.MessageExpiry = "30d"
 	}
@@ -238,8 +236,10 @@ func validateConfig(cfg QueueConfig) error {
 	}
 
 	// validate new duration fields
-	if _, err := ParseDurationExt(cfg.ResultTTL); err != nil {
-		return fmt.Errorf("result_ttl: %w", err)
+	if cfg.ResultTTL != "" {
+		if _, err := ParseDurationExt(cfg.ResultTTL); err != nil {
+			return fmt.Errorf("result_ttl: %w", err)
+		}
 	}
 	if _, err := ParseDurationExt(cfg.MessageExpiry); err != nil {
 		return fmt.Errorf("message_expiry: %w", err)
@@ -292,8 +292,10 @@ func ValidateConfigForAPI(cfg QueueConfig) error {
 	if cfg.Storage.GCIntervalSec < 0 || cfg.Storage.GCMaxDeletes < 0 {
 		return fmt.Errorf("storage gc settings must be >= 0")
 	}
-	if _, err := ParseDurationExt(cfg.ResultTTL); err != nil {
-		return fmt.Errorf("result_ttl: %w", err)
+	if cfg.ResultTTL != "" {
+		if _, err := ParseDurationExt(cfg.ResultTTL); err != nil {
+			return fmt.Errorf("result_ttl: %w", err)
+		}
 	}
 	if _, err := ParseDurationExt(cfg.MessageExpiry); err != nil {
 		return fmt.Errorf("message_expiry: %w", err)
@@ -331,9 +333,7 @@ func NormalizeConfigForAPI(cfg *QueueConfig) {
 	if cfg.LogDir == "" {
 		cfg.LogDir = "configs/scripts/logs"
 	}
-	if cfg.ResultTTL == "" {
-		cfg.ResultTTL = "10m"
-	}
+	// result_ttl: если не задан — результаты хранятся вечно
 	if cfg.MessageExpiry == "" {
 		cfg.MessageExpiry = "30d"
 	}

@@ -440,7 +440,10 @@ func (s *Store) MarkDone(msgID string, status Status, res Result, newExpiresAtMs
 		}
 
 		oldExp := meta.ExpiresAtMs
-		if newExpiresAtMs != 0 {
+		if newExpiresAtMs == -1 {
+			// sentinel: убрать expiration — хранить вечно
+			meta.ExpiresAtMs = 0
+		} else if newExpiresAtMs != 0 {
 			meta.ExpiresAtMs = newExpiresAtMs
 		}
 

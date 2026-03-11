@@ -189,13 +189,15 @@ func NewRuntime(
 	}
 
 	// ---- parse durations from config ----
-	resultTTL, err := config.ParseDurationExt(cfg.ResultTTL)
-	if err != nil {
-		return nil, fmt.Errorf("parse result_ttl: %w", err)
+	var resultTTL time.Duration
+	if strings.TrimSpace(cfg.ResultTTL) != "" {
+		var err error
+		resultTTL, err = config.ParseDurationExt(cfg.ResultTTL)
+		if err != nil {
+			return nil, fmt.Errorf("parse result_ttl: %w", err)
+		}
 	}
-	if resultTTL <= 0 {
-		resultTTL = 10 * time.Minute
-	}
+	// resultTTL == 0 означает "хранить вечно"
 
 	enqueueWait := time.Duration(cfg.EnqueueWaitMs) * time.Millisecond
 	if enqueueWait <= 0 {
@@ -463,7 +465,12 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 					// optional: don't leave task stuck in processing
 					if rt.Store != nil {
 						now := time.Now().UnixMilli()
-						ttlMs := time.Now().Add(rt.st.resultTTL).UnixMilli()
+						var ttlMs int64
+						if rt.st.resultTTL > 0 {
+							ttlMs = time.Now().Add(rt.st.resultTTL).UnixMilli()
+						} else {
+							ttlMs = -1
+						}
 
 						if err := rt.Store.MarkDone(
 							job.MsgID,
@@ -543,7 +550,12 @@ func (rt *Runtime) workerLoop(workerID int, runner Runner) {
 
 			if rt.Store != nil {
 				now := time.Now()
-				ttlMs := now.Add(rt.st.resultTTL).UnixMilli()
+				var ttlMs int64
+				if rt.st.resultTTL > 0 {
+					ttlMs = now.Add(rt.st.resultTTL).UnixMilli()
+				} else {
+					ttlMs = -1 // sentinel: убрать expiration, хранить вечно
+				}
 
 				err := rt.Store.MarkDone(
 					job.MsgID,

@@ -23,9 +23,7 @@ export default function DashboardPage() {
   const [timeFilter, setTimeFilter] = useState<number>(0)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
-  const fromMs = timeFilter > 0 ? Date.now() - timeFilter : undefined
-
-  const { data: infoData, isLoading: infoLoading, refetch } = useAllQueuesInfo(fromMs)
+  const { data: infoData, isLoading: infoLoading, refetch } = useAllQueuesInfo(timeFilter)
   const { data: listData, isLoading: listLoading } = useListQueues()
 
   const isLoading = infoLoading || listLoading

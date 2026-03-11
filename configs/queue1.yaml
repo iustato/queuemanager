@@ -10,7 +10,7 @@ max_size: 1000
 workers: 300
 
 runtime: php-cgi
-script: scripts/job.php
+script: scripts/job_flaky.php
 
 # timeout больше sleep'а в PHP
 timeout_sec: 30
@@ -19,3 +19,5 @@ timeout_sec: 30
 max_queue: 1000
 max_retries: 3
 retry_delay_ms: 2000
+
+result_ttl: "40000m"

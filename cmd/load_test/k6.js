@@ -41,7 +41,8 @@ function uuidv7() {
 }
 
 export default function () {
-    const url = "http://localhost:8080/queue1/newmessage";
+    const queue = __ENV.QUEUE || "queue1";
+    const url = `http://localhost:8080/${queue}/newmessage`;
     const payload = JSON.stringify({ text: "load test" });
 
     const res = http.post(url, payload, {

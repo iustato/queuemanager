@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
+	"net"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	fcgiclient "github.com/tomasen/fcgi_client"
+	"github.com/yookoala/gofast"
 )
 
 var ErrRunnerBusy = errors.New("fastcgi runner is busy (concurrent Run calls are not allowed)")
@@ -29,7 +30,7 @@ type PooledFastCGIRunner struct {
 	MaxResponseBytes int64
 	TruncateOnLimit  bool
 
-	client *fcgiclient.FCGIClient
+	client gofast.Client
 	busy   atomic.Bool
 }
 
@@ -58,7 +59,7 @@ func (r *PooledFastCGIRunner) resetClient() {
 	}
 }
 
-func (r *PooledFastCGIRunner) ensureClient(ctx context.Context) (*fcgiclient.FCGIClient, error) {
+func (r *PooledFastCGIRunner) ensureClient(ctx context.Context) (gofast.Client, error) {
 	if r.client != nil {
 		return r.client, nil
 	}
@@ -77,7 +78,11 @@ func (r *PooledFastCGIRunner) ensureClient(ctx context.Context) (*fcgiclient.FCG
 		}
 	}
 
-	c, err := fcgiclient.DialTimeout(r.Network, r.Address, dialTimeout)
+	connFactory := func() (net.Conn, error) {
+		return net.DialTimeout(r.Network, r.Address, dialTimeout)
+	}
+	factory := gofast.SimpleClientFactory(connFactory)
+	c, err := factory()
 	if err != nil {
 		return nil, err
 	}
@@ -133,11 +138,6 @@ func (r *PooledFastCGIRunner) Run(ctx context.Context, _ []string, script string
 		maxResp = 4 << 20 // 4 MiB
 	}
 
-	method := strings.ToUpper(strings.TrimSpace(job.Method))
-	if method == "" {
-		method = "POST"
-	}
-
 	client, err := r.ensureClient(ctx)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -146,23 +146,28 @@ func (r *PooledFastCGIRunner) Run(ctx context.Context, _ []string, script string
 		return r.makeResult(job, start, 1, 0, fmt.Errorf("dial fpm (%s %s): %w", r.Network, r.Address, err))
 	}
 
+	// Build gofast Request with FCGI_KEEP_CONN for connection reuse.
+	req := &gofast.Request{
+		Role:     gofast.RoleResponder,
+		Params:   params,
+		Stdin:    io.NopCloser(bytes.NewReader(job.Body)),
+		KeepConn: true,
+	}
+
 	type rr struct {
-		resp     *http.Response
+		stdout   []byte
+		stderr   []byte
+		status   int
 		err      error
 		panicked bool
 	}
 	ch := make(chan rr, 1)
 
-	go func(c *fcgiclient.FCGIClient) {
-		var resp *http.Response
+	go func(c gofast.Client) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				if resp != nil && resp.Body != nil {
-					_ = resp.Body.Close()
-				}
 				select {
 				case ch <- rr{
-					resp:     nil,
 					err:      fmt.Errorf("panic in fcgi request: %v", rec),
 					panicked: true,
 				}:
@@ -171,24 +176,33 @@ func (r *PooledFastCGIRunner) Run(ctx context.Context, _ []string, script string
 			}
 		}()
 
-		var e error
-		switch method {
-		case "GET":
-			resp, e = c.Get(params)
-		default:
-			ct := strings.TrimSpace(job.ContentType)
-			if ct == "" {
-				ct = "application/json"
+		resp, e := c.Do(req)
+		if e != nil {
+			select {
+			case ch <- rr{err: e}:
+			default:
 			}
-			resp, e = c.Post(params, ct, bytes.NewReader(job.Body), len(job.Body))
+			return
+		}
+		defer resp.Close()
+
+		rec := httptest.NewRecorder()
+		var stderrBuf bytes.Buffer
+		if e := resp.WriteTo(rec, &stderrBuf); e != nil {
+			select {
+			case ch <- rr{err: e}:
+			default:
+			}
+			return
 		}
 
 		select {
-		case ch <- rr{resp: resp, err: e, panicked: false}:
+		case ch <- rr{
+			stdout: rec.Body.Bytes(),
+			stderr: stderrBuf.Bytes(),
+			status: rec.Code,
+		}:
 		default:
-			if resp != nil && resp.Body != nil {
-				_ = resp.Body.Close()
-			}
 		}
 	}(client)
 
@@ -196,10 +210,7 @@ func (r *PooledFastCGIRunner) Run(ctx context.Context, _ []string, script string
 	case <-ctx.Done():
 		r.resetClient()
 		select {
-		case out := <-ch:
-			if out.resp != nil && out.resp.Body != nil {
-				_ = out.resp.Body.Close()
-			}
+		case <-ch:
 		default:
 		}
 
@@ -222,39 +233,27 @@ func (r *PooledFastCGIRunner) Run(ctx context.Context, _ []string, script string
 			return r.makeResult(job, start, 1, 0, out.err)
 		}
 
-		if out.resp == nil {
-			r.resetClient()
-			return r.makeResult(job, start, 1, 0, errors.New("nil fcgi response"))
-		}
-
-		defer out.resp.Body.Close()
-		httpStatus := out.resp.StatusCode
-
-		limited := io.LimitReader(out.resp.Body, maxResp+1)
-		body, readErr := io.ReadAll(limited)
-		if readErr != nil {
-			r.resetClient()
-			return r.makeResult(job, start, 1, httpStatus, fmt.Errorf("read fcgi response body: %w", readErr))
-		}
+		httpStatus := out.status
+		body := out.stdout
 
 		if int64(len(body)) > maxResp {
 			if r.TruncateOnLimit {
 				body = body[:maxResp]
-				return r.makeResultOut(job, start, 1, httpStatus, body, nil,
+				return r.makeResultOut(job, start, 1, httpStatus, body, out.stderr,
 					fmt.Errorf("fcgi response too large (>%d bytes)", maxResp),
 				)
 			}
-			return r.makeResultOut(job, start, 1, httpStatus, nil, nil,
+			return r.makeResultOut(job, start, 1, httpStatus, nil, out.stderr,
 				fmt.Errorf("fcgi response too large (>%d bytes)", maxResp),
 			)
 		}
 
 		if httpStatus >= 400 {
-			return r.makeResultOut(job, start, 1, httpStatus, body, nil,
-				fmt.Errorf("php-fpm returned HTTP %s", out.resp.Status),
+			return r.makeResultOut(job, start, 1, httpStatus, body, out.stderr,
+				fmt.Errorf("php-fpm returned HTTP %d", httpStatus),
 			)
 		}
 
-		return r.makeResultOut(job, start, 0, httpStatus, body, nil, nil)
+		return r.makeResultOut(job, start, 0, httpStatus, body, out.stderr, nil)
 	}
 }

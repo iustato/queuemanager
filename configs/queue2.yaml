@@ -2,16 +2,18 @@ name: queue2
 
 schema_file: queue1.schema.json
 
-max_size: 100
-workers: 40
+max_size: 1000
+workers: 300
 
 runtime: php-fpm
-script: configs/scripts/job.php
+script: scripts/job_flaky.php
 
 fpm_network: unix
 fpm_address: /run/php/php8.3-fpm.sock
 
 timeout_sec: 30
-max_queue: 200
-max_retries: 0
+max_queue: 1000
+max_retries: 3
 retry_delay_ms: 2000
+
+result_ttl: "40000m"
