@@ -209,67 +209,14 @@ func NewRuntime(
 	}
 
 	// ---- make runners: one-runner-per-worker ----
-	truncate := false
-	if cfg.TruncateOnLimit != nil {
-		truncate = *cfg.TruncateOnLimit
-	}
-
-	makeRunner := func() (Runner, error) {
-		// TEST/DI override
-		if ro.runnerFactory != nil {
-			return ro.runnerFactory()
-		}
-
-		switch rt.Kind {
-		case RuntimePHPFPM:
-			netw := strings.TrimSpace(rt.FPMNetwork)
-			addr := strings.TrimSpace(rt.FPMAddress)
-
-			if netw == "" {
-				netw = "unix"
-			}
-			if addr == "" {
-				return nil, fmt.Errorf("FPMAddress is required for php-fpm")
-			}
-
-			return &PooledFastCGIRunner{
-				Network:          netw,
-				Address:          addr,
-				ServerName:       cfg.FPMServerName,
-				ServerPort:       cfg.FPMServerPort,
-				DialTimeout:      time.Duration(cfg.FPMDialTimeoutMs) * time.Millisecond,
-				DocumentRoot:     "",
-				MaxResponseBytes: int64(cfg.MaxResponseBytes),
-				TruncateOnLimit:  truncate,
-			}, nil
-
-		case RuntimePHPCGI:
-			return PHPCGIRunner{
-				PhpCgiBin:        ro.phpCgiBin,
-				MaxStdoutBytes:   cfg.MaxStdoutBytes,
-				MaxStderrBytes:   cfg.MaxStderrBytes,
-				KillProcessGroup: true,
-			}, nil
-
-		case RuntimeExec:
-			fallthrough
-		default:
-			// Для exec команда обязательна
-			if len(rt.Command) == 0 {
-				return nil, fmt.Errorf("command is required for exec runtime")
-			}
-
-			return ExecRunner{
-				MaxStdoutBytes:   cfg.MaxStdoutBytes,
-				MaxStderrBytes:   cfg.MaxStderrBytes,
-				KillProcessGroup: true,
-			}, nil
-		}
+	factory := ro.runnerFactory
+	if factory == nil {
+		factory = DefaultRunnerFactory(rt, ro.phpCgiBin)
 	}
 
 	runners := make([]Runner, workers)
 	for i := 0; i < workers; i++ {
-		r, err := makeRunner()
+		r, err := factory()
 		if err != nil {
 			return nil, err
 		}

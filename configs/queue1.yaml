@@ -20,4 +20,4 @@ max_queue: 1000
 max_retries: 3
 retry_delay_ms: 2000
 
-result_ttl: "40000m"
+# result_ttl: "40000m"
